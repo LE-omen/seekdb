@@ -162,8 +162,9 @@ int ObExprAIRerank::eval_ai_rerank(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
 
     if (OB_FAIL(ret)) {
     } else if (has_doc_key) {
-      ObString doc_key = arg_doc_key->get_string();
-      if (OB_FAIL(eval_ai_rerank_with_doc_key(expr, ctx, temp_allocator, model_id,
+      ObString doc_key;
+      if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_doc_key, expr.args_[DOC_KEY_IDX]->datum_meta_, expr.args_[DOC_KEY_IDX]->obj_meta_.has_lob_header(), doc_key))) {
+      } else if (OB_FAIL(eval_ai_rerank_with_doc_key(expr, ctx, temp_allocator, model_id,
                   query, document_array, doc_key, *info, *endpoint_info, res))) {
       }
     } else {

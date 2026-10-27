@@ -94,7 +94,7 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
 
   if (OB_FAIL(tmp_allocator.eval_arg(arg0, ctx, template_datum))) {
   } else if (template_datum->is_null()) {
-    ret = OB_INVALID_ARGUMENT;
+    ret = OB_ERR_INVALID_TYPE_FOR_OP;
   } else if (!ob_is_string_type(arg0->datum_meta_.type_)) {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
   } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, tmp_allocator, *template_datum, arg0->datum_meta_, arg0->obj_meta_.has_lob_header(), template_str))) {
@@ -109,7 +109,7 @@ int ObExprAIPrompt::eval_ai_prompt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         ObIJsonBase *j_base = NULL;
         bool is_null = false;
         if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, tmp_allocator, i, j_base, is_null))) {
-        } else if (is_null) {
+        } else if (is_null || OB_ISNULL(j_base)) {
           ret = OB_ERR_INVALID_TYPE_FOR_OP;
         } else if (OB_FAIL(args_array->append(static_cast<ObJsonNode *>(j_base)))) {
         }

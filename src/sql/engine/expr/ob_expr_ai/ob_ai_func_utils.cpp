@@ -341,7 +341,7 @@ int ObOllamaUtils::ObOllamaComplete::parse_output(common::ObIAllocator &allocato
     if (OB_FAIL(j_path.parse_path())) {
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
     } else if (hit.size() == 0) {
-      ret = OB_ERR_UNEXPECTED;
+      ret = OB_INVALID_DATA;
     } else {
       result = hit[0];
     }
@@ -421,7 +421,7 @@ int ObOllamaUtils::ObOllamaEmbed::parse_output(common::ObIAllocator &allocator,
           result = wrap_arr;
         }
       } else {
-        ret = OB_ERR_UNEXPECTED;
+        ret = OB_INVALID_DATA;
       }
     }
   }
@@ -1489,10 +1489,12 @@ int ObAIFuncModel::call_dense_embedding_vector_v2(ObArray<ObString> &content, Ob
     ObJsonNode *dimension_node = config->get_value("dimensions");
     if (OB_ISNULL(dimension_node)) {
       // do nothing
-    } else if (dimension_node->json_type() != ObJsonNodeType::J_INT) {
-      ret = OB_ERR_UNEXPECTED;
+    } else if (dimension_node->json_type() == ObJsonNodeType::J_INT) {
+      dimension = dimension_node->get_int();
+    } else if (dimension_node->json_type() == ObJsonNodeType::J_UINT) {
+      dimension = static_cast<int64_t>(dimension_node->get_uint());
     } else {
-      dimension = static_cast<ObJsonInt *>(dimension_node)->get_int();
+      ret = OB_ERR_UNEXPECTED;
     }
   }
   
@@ -1679,7 +1681,11 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
           bool valid_index = true;
           for (int64_t k = start_pos + 1; k < end_pos && valid_index; k++) {
             if (template_ptr[k] >= '0' && template_ptr[k] <= '9') {
-              index = index * 10 + (template_ptr[k] - '0');
+              if (index > (INT64_MAX - 9) / 10) {
+                valid_index = false;
+              } else {
+                index = index * 10 + (template_ptr[k] - '0');
+              }
             } else {
               valid_index = false;
             }
