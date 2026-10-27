@@ -34,6 +34,7 @@ struct ObSchemaOperation;
 class ObMultiVersionSchemaService;
 class ObTableSchema;
 class ObColumnSchemaV2;
+class ObAiColumnSchema;
 
 class ObTableSqlService : public ObDDLSqlService
 {
@@ -60,6 +61,18 @@ public:
       const ObColumnSchemaV2 &column,
       share::ObDMLSqlSplicer &dml,
       const bool is_history = false);
+  static int gen_ai_column_dml(
+      const ObAiColumnSchema &ai_col,
+      share::ObDMLSqlSplicer &dml);
+  int add_ai_columns(
+      common::ObISQLClient &sql_client,
+      const ObTableSchema &table);
+  int batch_add_ai_columns_for_create_table(
+      common::ObISQLClient &sql_client,
+      const ObIArray<ObTableSchema> &tables);
+  int delete_from_all_ai_column(
+      common::ObISQLClient &sql_client,
+      const uint64_t table_id);
   virtual int batch_create_table(ObIArray<ObTableSchema> &tables,
                            common::ObISQLClient &sql_client,
                            const common::ObString *ddl_stmt_str = NULL,

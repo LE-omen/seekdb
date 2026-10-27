@@ -613,6 +613,28 @@ protected:
     int resolve_collection_column(
       const ParseNode *type_node,
       share::schema::ObColumnSchemaV2 &column);
+    int resolve_ai_column(
+      const ParseNode *node,
+      const share::schema::ObColumnSchemaV2 &column,
+      share::schema::ObTableSchema &table_schema,
+      uint64_t state_cid,
+      uint64_t req_cid,
+      uint64_t spec_cid);
+    int resolve_ai_column_options_(
+      const ParseNode *options_node,
+      common::ObString &sync_mode,
+      int64_t &max_retries);
+    int check_ai_column_dependencies_(
+      const ParseNode *node,
+      const share::schema::ObTableSchema &table_schema);
+    int validate_ai_column_vector_dim_(
+      const ParseNode *node,
+      const share::schema::ObColumnSchemaV2 &column,
+      const ParseNode *expr_node);
+    int enrich_ai_column_prompt_(
+      common::ObObjType data_type,
+      const common::ObString &raw_prompt,
+      common::ObString &enriched_prompt);
 
 
   static int is_gen_col_with_udf(const ObTableSchema &table_schema,

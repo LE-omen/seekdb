@@ -42,6 +42,7 @@
 #include "share/ob_define.h"
 #include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_trigger_info.h"
+#include "share/schema/ob_ai_column_schema.h"
 #include "lib/compress/ob_compress_util.h"
 namespace oceanbase
 {
@@ -1082,6 +1083,31 @@ public:
   int assign_constraint(const ObTableSchema &other);
   int is_range_col_part_type(bool &is_range_column_type) const;
   void clear_constraint();
+
+  // AI column related
+  int add_ai_column(const ObAiColumnSchema &ai_col);
+  int get_ai_column_schema(const uint64_t column_id, const ObAiColumnSchema *&ai_col) const;
+  int get_ai_column_schema(const common::ObString &column_name, const ObAiColumnSchema *&ai_col) const;
+  const ObAiColumnSchema *get_ai_column_schema(const uint64_t column_id) const
+  {
+    const ObAiColumnSchema *ai_col = NULL;
+    (void)get_ai_column_schema(column_id, ai_col);
+    return ai_col;
+  }
+  const ObAiColumnSchema *get_ai_column_schema(const common::ObString &column_name) const
+  {
+    const ObAiColumnSchema *ai_col = NULL;
+    (void)get_ai_column_schema(column_name, ai_col);
+    return ai_col;
+  }
+  int get_ai_column_schemas(common::ObIArray<const ObAiColumnSchema *> &ai_cols) const;
+  bool is_ai_column(const uint64_t column_id) const;
+  bool has_ai_column() const { return ai_column_array_.count() > 0; }
+  int64_t get_ai_column_count() const { return ai_column_array_.count(); }
+  const ObAiColumnSchema &get_ai_column_schema_by_idx(const int64_t idx) const { return ai_column_array_.at(idx); }
+  const common::ObSArray<ObAiColumnSchema> &get_ai_column_array() const { return ai_column_array_; }
+  common::ObSArray<ObAiColumnSchema> &get_ai_column_array() { return ai_column_array_; }
+  void clear_ai_columns() { ai_column_array_.reset(); }
   int set_index_params(const common::ObString &index_params) { return deep_copy_str(index_params, index_params_); }
   int set_exec_env(const common::ObString &exec_env) { return deep_copy_str(exec_env, exec_env_); }
   void set_lob_inrow_threshold(const int64_t lob_inrow_threshold) { lob_inrow_threshold_ = lob_inrow_threshold;}
@@ -1629,6 +1655,7 @@ protected:
   int64_t cst_array_capacity_;
   int64_t cst_cnt_;
   common::ObSArray<ObForeignKeyInfo> foreign_key_infos_;
+  common::ObSArray<ObAiColumnSchema> ai_column_array_;
 
   // trigger
   common::ObSArray<uint64_t> trigger_list_;

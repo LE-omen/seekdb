@@ -243,6 +243,10 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_generated_column_using_udf() const { return /*is_generated_column() && global index table clean the virtual gen col flag*/ !!(column_flags_ & GENERATED_COLUMN_UDF_EXPR); }
   // to check whether storing column in index table is specified by user.
   inline bool is_user_specified_storing_column() const { return column_flags_ & USER_SPECIFIED_STORING_COLUMN_FLAG; }
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline void set_is_ai_column(const bool is_ai) { if (is_ai) { add_column_flag(AI_COLUMN_FLAG); } else { del_column_flag(AI_COLUMN_FLAG); } }
+  inline bool is_ai_hidden_column() const { return column_flags_ & AI_COLUMN_HIDDEN_FLAG; }
+  inline void set_is_ai_hidden_column(const bool is_hidden) { if (is_hidden) { add_column_flag(AI_COLUMN_HIDDEN_FLAG); } else { del_column_flag(AI_COLUMN_HIDDEN_FLAG); } }
   inline bool is_default_srid() const { return UINT32_MAX == srs_info_.srid_; }
   inline void set_column_flags(int64_t flags) { column_flags_ = flags; }
   inline void erase_generated_column_flags()

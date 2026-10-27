@@ -31,6 +31,7 @@
 #include "query/ddl/ob_dynamic_partition_policy.h"
 #include "share/rc/ob_server_runtime.h"
 #include "share/schema/ob_table_schema.h"
+#include "share/schema/ob_ai_column_schema.h"
 #include "sql/engine/expr/ob_obj_cast_runtime.h"
 
 namespace oceanbase
@@ -1930,6 +1931,9 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
       if (OB_UNLIKELY(GEN_COLUMN_DEFINITION_NUM_CHILD == node->num_child_)) {
         // generated column with pos_column
         pos_node = node->children_[5];
+      } else if (node->num_child_ >= 6 && node->children_[4] != NULL && node->children_[4]->type_ == T_AI_COLUMN) {
+        // AI column with pos_column
+        pos_node = node->children_[5];
       } else {
         // normal column with pos_column
         pos_node = node->children_[3];
@@ -1964,6 +1968,9 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
           }
         }
       }
+    }
+    if (OB_SUCC(ret) && node->num_child_ >= 5 && node->children_[4] != NULL && node->children_[4]->type_ == T_AI_COLUMN) {
+      column.set_is_ai_column(true);
     }
   }
   return ret;
@@ -8073,6 +8080,299 @@ int ObDDLResolver::get_partition_keys_by_part_func_expr(
         ret = OB_ERR_PARSE_SQL;
       } else {
         pos += wc.length();
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::resolve_ai_column_options_(
+    const ParseNode *options_node,
+    common::ObString &sync_mode,
+    int64_t &max_retries)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(options_node)) {
+    // nothing to do
+  } else if (options_node->type_ == T_AI_COLUMN_OPTION) {
+    ParseNode *name_node = options_node->children_[0];
+    ParseNode *val_node = options_node->children_[1];
+    if (OB_NOT_NULL(name_node) && OB_NOT_NULL(val_node)) {
+      ObString opt_name(name_node->str_len_, name_node->str_value_);
+      if (0 == opt_name.case_compare("sync_mode")) {
+        ObString sm(val_node->str_len_, val_node->str_value_);
+        if (0 != sm.case_compare("async")) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "only sync_mode='async' is supported for AI column");
+        } else {
+          sync_mode = sm;
+        }
+      } else if (0 == opt_name.case_compare("max_retries")) {
+        int64_t r = val_node->value_;
+        if (val_node->type_ == T_VARCHAR || val_node->type_ == T_CHAR) {
+          r = atoll(val_node->str_value_);
+        }
+        if (r < 0) {
+          ret = OB_INVALID_ARGUMENT;
+        } else {
+          max_retries = r;
+        }
+      }
+    }
+  } else if (options_node->type_ == T_AI_COLUMN_OPTIONS || options_node->type_ == T_LINK_NODE) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < options_node->num_child_; ++i) {
+      if (OB_FAIL(resolve_ai_column_options_(options_node->children_[i], sync_mode, max_retries))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::check_ai_column_dependencies_(
+    const ParseNode *node,
+    const share::schema::ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+    // null
+  } else if (node->type_ == T_COLUMN_REF || node->type_ == T_IDENT) {
+    ObString name;
+    if (node->type_ == T_COLUMN_REF) {
+      ParseNode *col_name_node = node->children_[COLUMN_NAME_NODE];
+      if (OB_NOT_NULL(col_name_node) && col_name_node->str_value_ != NULL) {
+        name.assign_ptr(col_name_node->str_value_, static_cast<int32_t>(col_name_node->str_len_));
+      }
+    } else {
+      if (node->str_value_ != NULL) {
+        name.assign_ptr(node->str_value_, static_cast<int32_t>(node->str_len_));
+      }
+    }
+    if (!name.empty()) {
+      const ObAiColumnSchema *ai_col = NULL;
+      if (OB_SUCCESS == table_schema.get_ai_column_schema(name, ai_col) && ai_col != NULL) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column cannot depend on another AI column");
+      }
+    }
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+    if (OB_FAIL(check_ai_column_dependencies_(node->children_[i], table_schema))) {
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::validate_ai_column_vector_dim_(
+    const ParseNode *node,
+    const share::schema::ObColumnSchemaV2 &column,
+    const ParseNode *expr_node)
+{
+  int ret = OB_SUCCESS;
+  ParseNode *type_node = node->children_[1];
+  uint32_t expected_dim = 0;
+  if (OB_NOT_NULL(type_node) && type_node->type_ == T_COLLECTION && type_node->int32_values_[0] == 1) {
+    if (type_node->children_[0] != NULL) {
+      expected_dim = static_cast<uint32_t>(type_node->children_[0]->value_);
+    }
+  } else if (column.is_collection() && column.get_extended_type_info().count() > 0) {
+    const ObString &ti = column.get_extended_type_info().at(0);
+    int dim = 0;
+    if (sscanf(ti.ptr(), "VECTOR(%d)", &dim) == 1) {
+      expected_dim = static_cast<uint32_t>(dim);
+    }
+  }
+
+  if (expected_dim > 0 && OB_NOT_NULL(expr_node)) {
+    uint32_t expr_dim = 0;
+    if (expr_node->type_ == T_FUN_SYS && expr_node->children_[0] != NULL) {
+      ObString fname(expr_node->children_[0]->str_len_, expr_node->children_[0]->str_value_);
+      if (0 == fname.case_compare("ai_embed") && expr_node->children_[1] != NULL) {
+        ParseNode *params = expr_node->children_[1];
+        if (params->type_ == T_EXPR_LIST && params->num_child_ >= 3 && params->children_[2] != NULL) {
+          expr_dim = static_cast<uint32_t>(params->children_[2]->value_);
+        }
+      }
+    }
+    if (expr_dim == 0 && expr_node->str_value_ != NULL) {
+      const char *p = expr_node->str_value_;
+      if (strncasecmp(p, "AI_EMBED", 8) == 0) {
+        const char *c1 = strchr(p, ',');
+        if (c1 != NULL) {
+          const char *c2 = strchr(c1 + 1, ',');
+          if (c2 != NULL) {
+            expr_dim = static_cast<uint32_t>(atoi(c2 + 1));
+          }
+        }
+      }
+    }
+    if (expr_dim != 0 && expr_dim != expected_dim) {
+      ret = OB_ERR_INVALID_VECTOR_DIM;
+      LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM, expected_dim, expr_dim);
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::enrich_ai_column_prompt_(
+    common::ObObjType data_type,
+    const common::ObString &raw_prompt,
+    common::ObString &enriched_prompt)
+{
+  int ret = OB_SUCCESS;
+  const char *suffix = NULL;
+  if (ob_is_json_tc(data_type)) {
+    suffix = " Return exactly one valid JSON value.";
+  } else if (ob_is_int_tc(data_type)) {
+    suffix = " Return exactly one base-10 integer.";
+  }
+
+  if (suffix != NULL) {
+    int64_t len = raw_prompt.length() + strlen(suffix);
+    char *buf = static_cast<char *>(allocator_->alloc(len + 1));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      memcpy(buf, raw_prompt.ptr(), raw_prompt.length());
+      memcpy(buf + raw_prompt.length(), suffix, strlen(suffix));
+      buf[len] = '\0';
+      enriched_prompt.assign_ptr(buf, static_cast<int32_t>(len));
+    }
+  } else {
+    enriched_prompt = raw_prompt;
+  }
+  return ret;
+}
+
+int ObDDLResolver::resolve_ai_column(
+    const ParseNode *node,
+    const share::schema::ObColumnSchemaV2 &column,
+    share::schema::ObTableSchema &table_schema,
+    uint64_t state_cid,
+    uint64_t req_cid,
+    uint64_t spec_cid)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node) || OB_ISNULL(allocator_) || node->num_child_ < 5) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObString sync_mode = ObString::make_string("async");
+    int64_t max_retries = 2;
+    if (node->num_child_ >= 8 && node->children_[7] != NULL) {
+      if (OB_FAIL(resolve_ai_column_options_(node->children_[7], sync_mode, max_retries))) {
+        LOG_WARN("fail to resolve ai column options", K(ret));
+      }
+    }
+
+    ParseNode *expr_node = node->children_[3];
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(expr_node)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(check_ai_column_dependencies_(expr_node, table_schema))) {
+        LOG_WARN("fail to check ai column dependencies", K(ret));
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(validate_ai_column_vector_dim_(node, column, expr_node))) {
+        LOG_WARN("fail to validate ai vector dimension", K(ret));
+      }
+    }
+
+    ObString raw_expr;
+    ObString norm_expr;
+    if (OB_SUCC(ret)) {
+      if (expr_node->str_value_ != NULL && expr_node->str_len_ > 0) {
+        raw_expr.assign_ptr(expr_node->str_value_, static_cast<int32_t>(expr_node->str_len_));
+      }
+      if (OB_FAIL(enrich_ai_column_prompt_(column.get_data_type(), raw_expr, norm_expr))) {
+        LOG_WARN("fail to enrich ai column prompt", K(ret));
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      const ObString &col_name = column.get_column_name_str();
+
+      // State column: __ai_state_<col> (INT)
+      ObColumnSchemaV2 state_col;
+      state_col.set_table_id(table_schema.get_table_id());
+      state_col.set_column_id(state_cid);
+      char state_name[OB_MAX_COLUMN_NAME_LENGTH + 1] = {0};
+      snprintf(state_name, sizeof(state_name), "__ai_state_%.*s", col_name.length(), col_name.ptr());
+      if (OB_FAIL(state_col.set_column_name(state_name))) {
+      } else {
+        state_col.set_data_type(ObIntType);
+        state_col.set_is_hidden(true);
+        state_col.set_is_ai_hidden_column(true);
+        state_col.set_nullable(false);
+        ObObj def_val;
+        def_val.set_int(0);
+        state_col.set_cur_default_value(def_val);
+        state_col.set_orig_default_value(def_val);
+        if (OB_FAIL(table_schema.add_column(state_col))) {
+          LOG_WARN("fail to add state column", K(ret));
+        }
+      }
+
+      // Request column: __ai_req_<col> (VARCHAR 64)
+      if (OB_SUCC(ret)) {
+        ObColumnSchemaV2 req_col;
+        req_col.set_table_id(table_schema.get_table_id());
+        req_col.set_column_id(req_cid);
+        char req_name[OB_MAX_COLUMN_NAME_LENGTH + 1] = {0};
+        snprintf(req_name, sizeof(req_name), "__ai_req_%.*s", col_name.length(), col_name.ptr());
+        if (OB_FAIL(req_col.set_column_name(req_name))) {
+        } else {
+          req_col.set_data_type(ObVarcharType);
+          req_col.set_data_length(64);
+          req_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+          req_col.set_charset_type(CHARSET_UTF8MB4);
+          req_col.set_is_hidden(true);
+          req_col.set_is_ai_hidden_column(true);
+          if (OB_FAIL(table_schema.add_column(req_col))) {
+            LOG_WARN("fail to add request column", K(ret));
+          }
+        }
+      }
+
+      // Result spec column: __ai_spec_<col> (VARCHAR 512)
+      if (OB_SUCC(ret)) {
+        ObColumnSchemaV2 spec_col;
+        spec_col.set_table_id(table_schema.get_table_id());
+        spec_col.set_column_id(spec_cid);
+        char spec_name[OB_MAX_COLUMN_NAME_LENGTH + 1] = {0};
+        snprintf(spec_name, sizeof(spec_name), "__ai_spec_%.*s", col_name.length(), col_name.ptr());
+        if (OB_FAIL(spec_col.set_column_name(spec_name))) {
+        } else {
+          spec_col.set_data_type(ObVarcharType);
+          spec_col.set_data_length(512);
+          spec_col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+          spec_col.set_charset_type(CHARSET_UTF8MB4);
+          spec_col.set_is_hidden(true);
+          spec_col.set_is_ai_hidden_column(true);
+          if (OB_FAIL(table_schema.add_column(spec_col))) {
+            LOG_WARN("fail to add spec column", K(ret));
+          }
+        }
+      }
+
+      // ObAiColumnSchema
+      if (OB_SUCC(ret)) {
+        ObAiColumnSchema ai_col(allocator_);
+        ai_col.set_table_id(table_schema.get_table_id());
+        ai_col.set_column_id(column.get_column_id());
+        if (OB_FAIL(ai_col.set_column_name(col_name))) {
+        } else if (OB_FAIL(ai_col.set_sync_mode(sync_mode))) {
+        } else if (OB_FAIL(ai_col.set_raw_expr(raw_expr))) {
+        } else if (OB_FAIL(ai_col.set_normalized_expr(norm_expr))) {
+        } else {
+          ai_col.set_max_retries(max_retries);
+          ai_col.set_state_column_id(state_cid);
+          ai_col.set_request_column_id(req_cid);
+          ai_col.set_result_spec_column_id(spec_cid);
+          if (OB_FAIL(table_schema.add_ai_column(ai_col))) {
+            LOG_WARN("fail to add ai col schema", K(ret));
+          }
+        }
       }
     }
   }

@@ -21,6 +21,7 @@
 #include "share/ob_share_util.h"
 // TODO, move basic structs to ob_schema_struct.h
 #include "observer/schema/ob_schema_retrieve_utils.h"
+#include "share/schema/ob_ai_column_schema.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "share/ob_sql_client_decorator.h"
@@ -713,6 +714,9 @@ int ObSchemaServiceSQLImpl::get_not_core_table_schemas(
         } else if (!GCTX.in_bootstrap_
                    && OB_FAIL(fetch_all_column_info(schema_status, schema_version, sql_client,
                                                     not_core_schemas, &table_ids.at(begin), end - begin))) {
+        } else if (!GCTX.in_bootstrap_
+                   && OB_FAIL(fetch_all_ai_column_info(schema_status, schema_version, sql_client,
+                                                       not_core_schemas, &table_ids.at(begin), end - begin))) {
         } else if (non_dependency_table_ids.count() > 0
                    && OB_FAIL(fetch_all_partition_info(schema_status, schema_version, sql_client,
                                                        not_core_schemas, &non_dependency_table_ids.at(0),
@@ -4083,6 +4087,9 @@ int ObSchemaServiceSQLImpl::get_not_core_table_schema(
   } else if (OB_FAIL(fetch_column_info(schema_status, table_id, schema_version,
                                        sql_client, table_schema))) {
   } else if (!is_schema_fetch_dependency
+             && OB_FAIL(fetch_ai_column_info(schema_status, table_id, schema_version,
+                                             sql_client, table_schema))) {
+  } else if (!is_schema_fetch_dependency
              && OB_FAIL(fetch_partition_info(schema_status, table_id, schema_version,
                                              sql_client, table_schema))) {
   }
@@ -4166,6 +4173,185 @@ int ObSchemaServiceSQLImpl::fetch_column_info(const ObRefreshSchemaStatus &schem
       } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(ObSchemaRetrieveUtils::retrieve_column_schema(check_deleted, *result, table_schema))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObSchemaServiceSQLImpl::fetch_ai_column_info(
+    const ObRefreshSchemaStatus &schema_status,
+    const uint64_t table_id,
+    const int64_t schema_version,
+    ObISQLClient &sql_client,
+    ObTableSchema *&table_schema)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(schema_version);
+  if (OB_ISNULL(table_schema)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      ObSqlString sql;
+      const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+      if (OB_FAIL(sql.append_fmt("SELECT table_id, column_id, column_name, sync_mode, max_retries, state_column_id, request_column_id, result_spec_column_id, raw_expr, normalized_expr FROM %s WHERE table_id = %lu ORDER BY column_id",
+                                 OB_ALL_AI_COLUMN_TNAME, table_id))) {
+      } else {
+        DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+        if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
+          if (OB_TABLE_NOT_EXIST == ret || OB_ERR_BAD_TABLE == ret) {
+            ret = OB_SUCCESS;
+          }
+        } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          while (OB_SUCC(ret)) {
+            if (OB_FAIL(result->next())) {
+              if (OB_ITER_END == ret) {
+                ret = OB_SUCCESS;
+                break;
+              } else {
+                LOG_WARN("fail to get next result", K(ret));
+              }
+            } else {
+              uint64_t col_table_id = OB_INVALID_ID;
+              uint64_t column_id = OB_INVALID_ID;
+              ObString column_name;
+              ObString sync_mode;
+              int64_t max_retries = 0;
+              uint64_t state_column_id = OB_INVALID_ID;
+              uint64_t request_column_id = OB_INVALID_ID;
+              uint64_t result_spec_column_id = OB_INVALID_ID;
+              ObString raw_expr;
+              ObString normalized_expr;
+
+              EXTRACT_INT_FIELD_MYSQL(*result, "table_id", col_table_id, uint64_t);
+              EXTRACT_INT_FIELD_MYSQL(*result, "column_id", column_id, uint64_t);
+              EXTRACT_VARCHAR_FIELD_MYSQL(*result, "column_name", column_name);
+              EXTRACT_VARCHAR_FIELD_MYSQL(*result, "sync_mode", sync_mode);
+              EXTRACT_INT_FIELD_MYSQL(*result, "max_retries", max_retries, int64_t);
+              EXTRACT_INT_FIELD_MYSQL(*result, "state_column_id", state_column_id, uint64_t);
+              EXTRACT_INT_FIELD_MYSQL(*result, "request_column_id", request_column_id, uint64_t);
+              EXTRACT_INT_FIELD_MYSQL(*result, "result_spec_column_id", result_spec_column_id, uint64_t);
+              EXTRACT_VARCHAR_FIELD_MYSQL(*result, "raw_expr", raw_expr);
+              EXTRACT_VARCHAR_FIELD_MYSQL(*result, "normalized_expr", normalized_expr);
+
+              if (OB_SUCC(ret)) {
+                ObAiColumnSchema ai_col;
+                ai_col.set_table_id(col_table_id);
+                ai_col.set_column_id(column_id);
+                if (OB_FAIL(ai_col.set_column_name(column_name))) {
+                } else if (OB_FAIL(ai_col.set_sync_mode(sync_mode))) {
+                } else if (OB_FAIL(ai_col.set_raw_expr(raw_expr))) {
+                } else if (OB_FAIL(ai_col.set_normalized_expr(normalized_expr))) {
+                } else {
+                  ai_col.set_max_retries(max_retries);
+                  ai_col.set_state_column_id(state_column_id);
+                  ai_col.set_request_column_id(request_column_id);
+                  ai_col.set_result_spec_column_id(result_spec_column_id);
+                  if (OB_FAIL(table_schema->add_ai_column(ai_col))) {
+                    LOG_WARN("fail to add ai col to table", K(ret));
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObSchemaServiceSQLImpl::fetch_all_ai_column_info(
+    const ObRefreshSchemaStatus &schema_status,
+    const int64_t schema_version,
+    ObISQLClient &sql_client,
+    ObArray<ObTableSchema *> &table_schema_array,
+    const uint64_t *table_ids /* = NULL */,
+    const int64_t table_ids_size /*= 0 */)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(schema_version);
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    ObMySQLResult *result = NULL;
+    ObSqlString sql;
+    const int64_t snapshot_timestamp = schema_status.snapshot_timestamp_;
+    if (OB_FAIL(sql.append_fmt("SELECT table_id, column_id, column_name, sync_mode, max_retries, state_column_id, request_column_id, result_spec_column_id, raw_expr, normalized_expr FROM %s WHERE 1 = 1", OB_ALL_AI_COLUMN_TNAME))) {
+    } else {
+      if (NULL != table_ids && table_ids_size > 0) {
+        if (OB_FAIL(sql.append_fmt(" AND table_id IN "))) {
+        } else if (OB_FAIL(sql_append_pure_ids(schema_status, table_ids, table_ids_size, sql))) {
+        }
+      }
+      if (FAILEDx(sql.append_fmt(" ORDER BY TABLE_ID, COLUMN_ID"))) {
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      DEFINE_SQL_CLIENT_RETRY_WEAK_WITH_SNAPSHOT(sql_client, snapshot_timestamp);
+      if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
+        if (OB_TABLE_NOT_EXIST == ret || OB_ERR_BAD_TABLE == ret) {
+          ret = OB_SUCCESS;
+        }
+      } else if (OB_UNLIKELY(NULL == (result = res.get_result()))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        while (OB_SUCC(ret)) {
+          if (OB_FAIL(result->next())) {
+            if (OB_ITER_END == ret) {
+              ret = OB_SUCCESS;
+              break;
+            } else {
+              LOG_WARN("fail to get next result", K(ret));
+            }
+          } else {
+            uint64_t table_id = OB_INVALID_ID;
+            uint64_t column_id = OB_INVALID_ID;
+            ObString column_name;
+            ObString sync_mode;
+            int64_t max_retries = 0;
+            uint64_t state_column_id = OB_INVALID_ID;
+            uint64_t request_column_id = OB_INVALID_ID;
+            uint64_t result_spec_column_id = OB_INVALID_ID;
+            ObString raw_expr;
+            ObString normalized_expr;
+
+            EXTRACT_INT_FIELD_MYSQL(*result, "table_id", table_id, uint64_t);
+            EXTRACT_INT_FIELD_MYSQL(*result, "column_id", column_id, uint64_t);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result, "column_name", column_name);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result, "sync_mode", sync_mode);
+            EXTRACT_INT_FIELD_MYSQL(*result, "max_retries", max_retries, int64_t);
+            EXTRACT_INT_FIELD_MYSQL(*result, "state_column_id", state_column_id, uint64_t);
+            EXTRACT_INT_FIELD_MYSQL(*result, "request_column_id", request_column_id, uint64_t);
+            EXTRACT_INT_FIELD_MYSQL(*result, "result_spec_column_id", result_spec_column_id, uint64_t);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result, "raw_expr", raw_expr);
+            EXTRACT_VARCHAR_FIELD_MYSQL(*result, "normalized_expr", normalized_expr);
+
+            if (OB_SUCC(ret)) {
+              ObTableSchema *table = ObSchemaRetrieveUtils::find_table_schema(table_id, table_schema_array);
+              if (OB_NOT_NULL(table)) {
+                ObAiColumnSchema ai_col;
+                ai_col.set_table_id(table_id);
+                ai_col.set_column_id(column_id);
+                if (OB_FAIL(ai_col.set_column_name(column_name))) {
+                } else if (OB_FAIL(ai_col.set_sync_mode(sync_mode))) {
+                } else if (OB_FAIL(ai_col.set_raw_expr(raw_expr))) {
+                } else if (OB_FAIL(ai_col.set_normalized_expr(normalized_expr))) {
+                } else {
+                  ai_col.set_max_retries(max_retries);
+                  ai_col.set_state_column_id(state_column_id);
+                  ai_col.set_request_column_id(request_column_id);
+                  ai_col.set_result_spec_column_id(result_spec_column_id);
+                  if (OB_FAIL(table->add_ai_column(ai_col))) {
+                    LOG_WARN("fail to add ai col to table", K(ret));
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

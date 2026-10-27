@@ -29,6 +29,7 @@
 #include "sql/engine/cmd/ob_ddl_executor_util.h"
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
 #include "sql/resolver/ddl/ob_alter_table_stmt.h"
+#include "share/schema/ob_ai_column_schema.h"
 #include "sql/resolver/ddl/ob_drop_table_stmt.h"
 #include "sql/resolver/ddl/ob_rename_table_stmt.h"
 #include "sql/resolver/ddl/ob_truncate_table_stmt.h"
@@ -751,6 +752,252 @@ int ObAlterTableExecutor::alter_table_exchange_partition_rpc(obcall::ObExchangeP
   return ret;
 }
 
+static int rewrite_ai_retry_where_clause(
+    const ObString &orig_where,
+    const ObString &state_col_name,
+    ObSqlString &out_where)
+{
+  int ret = OB_SUCCESS;
+  const char *str = orig_where.ptr();
+  int32_t len = orig_where.length();
+  int32_t i = 0;
+  bool in_status_context = false;
+
+  while (i < len && OB_SUCC(ret)) {
+    char c = str[i];
+    if (c == '`') {
+      out_where.append_at(c);
+      i++;
+      while (i < len && str[i] != '`') {
+        out_where.append_at(str[i]);
+        i++;
+      }
+      if (i < len && str[i] == '`') {
+        out_where.append_at('`');
+        i++;
+      }
+    } else if (c == '\'') {
+      int32_t start = i;
+      i++;
+      while (i < len && str[i] != '\'') {
+        if (str[i] == '\\' && i + 1 < len) {
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      int32_t end = (i < len && str[i] == '\'') ? i : len - 1;
+      if (i < len && str[i] == '\'') {
+        i++;
+      }
+      ObString lit(end - start - 1, str + start + 1);
+      if (in_status_context) {
+        if (0 == lit.case_compare("PENDING")) {
+          ret = out_where.append("0");
+        } else if (0 == lit.case_compare("GENERATING")) {
+          ret = out_where.append("1");
+        } else if (0 == lit.case_compare("READY")) {
+          ret = out_where.append("2");
+        } else if (0 == lit.case_compare("RETRY")) {
+          ret = out_where.append("3");
+        } else if (0 == lit.case_compare("FAILED")) {
+          ret = out_where.append("4");
+        } else {
+          ret = out_where.append(str + start, i - start);
+        }
+        in_status_context = false;
+      } else {
+        ret = out_where.append(str + start, i - start);
+      }
+    } else if (isalpha(c) || c == '_') {
+      int32_t start = i;
+      while (i < len && (isalnum(str[i]) || str[i] == '_')) {
+        i++;
+      }
+      ObString word(i - start, str + start);
+      if (0 == word.case_compare("status")) {
+        ret = out_where.append("`");
+        if (OB_SUCC(ret)) ret = out_where.append(state_col_name.ptr(), state_col_name.length());
+        if (OB_SUCC(ret)) ret = out_where.append("`");
+        in_status_context = true;
+      } else {
+        if (0 == word.case_compare("and") || 0 == word.case_compare("or") || 0 == word.case_compare("xor")) {
+          in_status_context = false;
+        }
+        ret = out_where.append(str + start, i - start);
+      }
+    } else {
+      if (c == ';' || c == ')') {
+        in_status_context = false;
+      }
+      out_where.append_at(c);
+      i++;
+    }
+  }
+  return ret;
+}
+
+int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx, ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx.get_my_session();
+  ObMySQLProxy *sql_proxy = ctx.get_sql_proxy();
+  if (OB_ISNULL(sql_proxy)) {
+    sql_proxy = GCTX.sql_proxy_;
+  }
+  if (OB_ISNULL(session) || OB_ISNULL(sql_proxy)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session or sql_proxy is null", K(ret));
+  } else {
+    ObString db_name = stmt.get_origin_database_name();
+    if (db_name.empty()) {
+      db_name = session->get_database_name();
+    }
+    ObString tbl_name = stmt.get_table_name();
+    share::schema::ObSchemaGetterGuard schema_guard;
+    const share::schema::ObTableSchema *table_schema = nullptr;
+    if (OB_ISNULL(GCTX.schema_service_)) {
+      ret = OB_NOT_INIT;
+    } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(schema_guard))) {
+    } else if (OB_FAIL(schema_guard.get_table_schema(db_name, tbl_name, false, table_schema))) {
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_TABLE_NOT_EXIST;
+    } else {
+      const ObString &ai_col_name = stmt.get_ai_column_retry_col_name();
+      const share::schema::ObAiColumnSchema *ai_col = nullptr;
+      if (OB_FAIL(table_schema->get_ai_column_schema(ai_col_name, ai_col)) || OB_ISNULL(ai_col)) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column is not supported");
+      } else {
+        const share::schema::ObColumnSchemaV2 *state_col = table_schema->get_column_schema(ai_col->get_state_column_id());
+        const share::schema::ObColumnSchemaV2 *req_col = table_schema->get_column_schema(ai_col->get_request_column_id());
+        if (OB_ISNULL(state_col) || OB_ISNULL(req_col)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          // Prepare WHERE clause
+          ObSqlString where_sql;
+          const ObString &where_clause = stmt.get_ai_column_retry_where_clause();
+          if (!where_clause.empty()) {
+            if (OB_FAIL(rewrite_ai_retry_where_clause(where_clause, state_col->get_column_name_str(), where_sql))) {
+              LOG_WARN("fail to rewrite ai retry where clause", K(ret));
+            }
+          }
+
+          if (OB_SUCC(ret)) {
+            // Build SELECT query for primary key columns of matching rows
+            const share::schema::ObRowkeyInfo &rowkey_info = table_schema->get_rowkey_info();
+            int64_t rowkey_cnt = rowkey_info.get_size();
+            ObSqlString select_sql;
+            if (OB_FAIL(select_sql.assign("SELECT "))) {
+            }
+            for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_cnt; ++i) {
+              uint64_t cid = rowkey_info.get_column_id(i);
+              const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema(cid);
+              if (OB_ISNULL(c)) {
+                ret = OB_ERR_UNEXPECTED;
+              } else {
+                if (i > 0) {
+                  select_sql.append(", ");
+                }
+                select_sql.append_fmt("`%.*s`", c->get_column_name_str().length(), c->get_column_name_str().ptr());
+              }
+            }
+            if (OB_SUCC(ret)) {
+              select_sql.append_fmt(" FROM `%.*s`.`%.*s`", db_name.length(), db_name.ptr(), tbl_name.length(), tbl_name.ptr());
+              if (!where_sql.empty()) {
+                select_sql.append_fmt(" WHERE %.*s", where_sql.length(), where_sql.ptr());
+              }
+            }
+
+            // Execute SELECT and collect rowkey predicates
+            ObArenaAllocator alloc(ObModIds::OB_MODULE_PAGE_ALLOCATOR, OB_MALLOC_NORMAL_BLOCK_SIZE);
+            ObSEArray<ObString, 64> matching_preds;
+            if (OB_SUCC(ret)) {
+              SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+                ObMySQLResult *result_set = NULL;
+                if (OB_FAIL(sql_proxy->read(res, select_sql.ptr()))) {
+                  LOG_WARN("fail to query matching rows for ai retry", K(ret), K(select_sql));
+                } else if (OB_ISNULL(result_set = res.get_result())) {
+                  ret = OB_ERR_UNEXPECTED;
+                } else {
+                  while (OB_SUCC(ret) && OB_SUCC(result_set->next())) {
+                    char *buf = nullptr;
+                    int64_t len = 0;
+                    int64_t pos = 0;
+                    for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_cnt; ++i) {
+                      uint64_t cid = rowkey_info.get_column_id(i);
+                      const share::schema::ObColumnSchemaV2 *c = table_schema->get_column_schema(cid);
+                      ObObj obj;
+                      if (OB_FAIL(result_set->get_obj(i, obj))) {
+                      } else if (OB_FAIL(databuff_printf(buf, len, pos, alloc, "`%.*s` = ",
+                                                        c->get_column_name_str().length(),
+                                                        c->get_column_name_str().ptr()))) {
+                      } else {
+                        ObObjPrintParams print_params;
+                        if (OB_FAIL(obj.print_sql_literal(buf, len, pos, alloc, print_params))) {
+                        } else if (i + 1 < rowkey_cnt && OB_FAIL(databuff_printf(buf, len, pos, alloc, " and "))) {
+                        }
+                      }
+                    }
+                    if (OB_SUCC(ret) && pos > 0) {
+                      ObString pred(pos, buf);
+                      matching_preds.push_back(pred);
+                    }
+                  }
+                  if (OB_ITER_END == ret) {
+                    ret = OB_SUCCESS;
+                  }
+                }
+              }
+            }
+
+            // Invalidate rows and enqueue retry tasks for matching rows
+            if (OB_SUCC(ret) && !matching_preds.empty()) {
+              uint64_t table_id = table_schema->get_table_id();
+              uint64_t col_id = ai_col->get_column_id();
+              int64_t req_id = ObTimeUtility::current_time();
+              for (int64_t k = 0; OB_SUCC(ret) && k < matching_preds.count(); ++k) {
+                const ObString &rowkey_pred = matching_preds.at(k);
+                int64_t affected_rows = 0;
+                // Delete old task
+                ObSqlString del_sql;
+                del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = '%.*s'",
+                                   table_id, col_id, rowkey_pred.length(), rowkey_pred.ptr());
+                (void)sql_proxy->write(del_sql.ptr(), affected_rows);
+
+                // Insert retry task
+                ObSqlString ins_sql;
+                ins_sql.assign_fmt("INSERT INTO oceanbase.__all_ai_column_task "
+                                   "(table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
+                                   "VALUES (%lu, %lu, '%.*s', %ld, now(6), 0, 0)",
+                                   table_id, col_id, rowkey_pred.length(), rowkey_pred.ptr(), req_id);
+                if (OB_FAIL(sql_proxy->write(ins_sql.ptr(), affected_rows))) {
+                  LOG_WARN("fail to insert ai retry task", K(ret), K(ins_sql));
+                } else {
+                  // Invalidate user row
+                  ObSqlString upd_sql;
+                  upd_sql.assign_fmt("UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%.*s` = 0, `%.*s` = %ld WHERE %.*s",
+                                     db_name.length(), db_name.ptr(),
+                                     tbl_name.length(), tbl_name.ptr(),
+                                     ai_col->get_column_name().length(), ai_col->get_column_name().ptr(),
+                                     state_col->get_column_name_str().length(), state_col->get_column_name_str().ptr(),
+                                     req_col->get_column_name_str().length(), req_col->get_column_name_str().ptr(),
+                                     req_id,
+                                     rowkey_pred.length(), rowkey_pred.ptr());
+                  if (OB_FAIL(sql_proxy->write(upd_sql.ptr(), affected_rows))) {
+                    LOG_WARN("fail to update user row for ai retry", K(ret), K(upd_sql));
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -762,6 +1009,8 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_ai_column_retry()) {
+    ret = execute_ai_column_retry(ctx, stmt);
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;

@@ -400,7 +400,7 @@ END_P SET_VAR DELIMITER
 %type <node> select_with_parens select_no_parens select_clause select_into no_table_select_with_order_and_limit simple_select_with_order_and_limit select_with_parens_with_order_and_limit select_clause_set_with_order_and_limit
 %type <node> simple_select no_table_select limit_clause select_expr_list opt_approx
 %type <node> with_select with_clause with_list common_table_expr opt_column_alias_name_list alias_name_list column_alias_name
-%type <node> opt_where opt_hint_value opt_groupby opt_rollup opt_order_by order_by opt_having groupby_clause order_by_opt_null
+%type <node> opt_where opt_hint_value opt_groupby opt_rollup opt_order_by order_by opt_having groupby_clause order_by_opt_null opt_where_clause
 %type <node> opt_limit_clause limit_expr opt_lock_type opt_for_update opt_for_update_wait opt_lock_in_share_mode
 %type <node> sort_list sort_key opt_asc_desc sort_list_for_group_by sort_key_for_group_by opt_asc_desc_for_group_by sort_list_opt_null sort_key_opt_null opt_asc_desc_null
 %type <node> opt_query_expression_option_list query_expression_option_list query_expression_option opt_distinct opt_distinct_or_all opt_separator projection
@@ -16884,6 +16884,18 @@ ai_column_option_val:
   | relation_name
   {
     $$ = $1;
+  }
+;
+
+opt_where_clause:
+  /* empty */
+  {
+    $$ = NULL;
+  }
+  | WHERE expr
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_WHERE_CLAUSE, 1, $2);
+    dup_expr_string($$, result, @2.first_column, @2.last_column);
   }
 ;
 

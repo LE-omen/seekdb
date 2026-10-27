@@ -138,6 +138,8 @@ private:
       ObSQLSessionInfo *my_session,
       query::ObIRootCommandService &root_commands);
 
+  int execute_ai_column_retry(ObExecContext &ctx, ObAlterTableStmt &stmt);
+
   int need_check_constraint_validity(obcall::ObAlterTableArg &alter_table_arg, bool &need_check);
 
 

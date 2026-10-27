@@ -1138,6 +1138,7 @@ ObTableSchema::ObTableSchema(ObIAllocator *allocator)
     partition_key_info_(allocator),
     subpartition_key_info_(allocator),
     foreign_key_infos_(SCHEMA_BIG_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
+    ai_column_array_(SCHEMA_SMALL_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
     trigger_list_(SCHEMA_SMALL_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
     depend_mock_fk_parent_table_ids_(SCHEMA_SMALL_MALLOC_BLOCK_SIZE, ModulePageAllocator(*allocator)),
     name_generated_type_(GENERATED_TYPE_UNKNOWN),
@@ -1327,6 +1328,15 @@ int ObTableSchema::assign(const ObTableSchema &src_schema)
 
   if (OB_SUCC(ret)) {
     semistruct_encoding_type_ = src_schema.semistruct_encoding_type_;
+  }
+
+  if (OB_SUCC(ret)) {
+    ai_column_array_.reset();
+    for (int64_t i = 0; OB_SUCC(ret) && i < src_schema.ai_column_array_.count(); ++i) {
+      if (OB_FAIL(add_ai_column(src_schema.ai_column_array_.at(i)))) {
+        LOG_WARN("fail to add ai column in assign", K(ret));
+      }
+    }
   }
 
   if (OB_FAIL(ret)) {
@@ -2514,6 +2524,11 @@ int64_t ObTableSchema::get_convert_size() const
   convert_size += foreign_key_infos_.get_data_size();
   for (int64_t i = 0; i < foreign_key_infos_.count(); ++i) {
     convert_size += foreign_key_infos_.at(i).get_convert_size();
+  }
+
+  convert_size += ai_column_array_.get_data_size();
+  for (int64_t i = 0; i < ai_column_array_.count(); ++i) {
+    convert_size += ai_column_array_.at(i).get_convert_size();
   }
 
   convert_size += trigger_list_.get_data_size();
@@ -5370,6 +5385,7 @@ OB_DEF_SERIALIZE(ObTableSchema)
   OB_UNIS_ENCODE(tablet_size_);
   OB_UNIS_ENCODE(pctfree_);
   OB_UNIS_ENCODE(foreign_key_infos_);
+  OB_UNIS_ENCODE(ai_column_array_);
   OB_UNIS_ENCODE(partition_status_);
   OB_UNIS_ENCODE(partition_schema_version_);
   OB_UNIS_ENCODE(session_id_);
@@ -5547,6 +5563,7 @@ OB_DEF_DESERIALIZE(ObTableSchema)
   OB_UNIS_DECODE(tablet_size_);
   OB_UNIS_DECODE(pctfree_);
   OB_UNIS_DECODE(foreign_key_infos_);
+  OB_UNIS_DECODE(ai_column_array_);
   OB_UNIS_DECODE(partition_status_);
   OB_UNIS_DECODE(partition_schema_version_);
   OB_UNIS_DECODE(session_id_);
@@ -5684,6 +5701,7 @@ OB_DEF_SERIALIZE_SIZE(ObTableSchema)
   OB_UNIS_ADD_LEN(tablet_size_);
   OB_UNIS_ADD_LEN(pctfree_);
   OB_UNIS_ADD_LEN(foreign_key_infos_);
+  OB_UNIS_ADD_LEN(ai_column_array_);
   OB_UNIS_ADD_LEN(partition_status_);
   OB_UNIS_ADD_LEN(partition_schema_version_);
   OB_UNIS_ADD_LEN(session_id_);
@@ -7105,6 +7123,69 @@ int64_t ObPrintableTableSchema::to_string(char *buf, const int64_t buf_len) cons
   );
   J_OBJ_END();
   return pos;
+}
+
+int ObTableSchema::add_ai_column(const ObAiColumnSchema &ai_col)
+{
+  int ret = OB_SUCCESS;
+  ObAiColumnSchema new_ai_col(allocator_);
+  if (OB_FAIL(new_ai_col.assign(ai_col))) {
+    LOG_WARN("fail to assign ai col schema", K(ret));
+  } else if (OB_FAIL(ai_column_array_.push_back(new_ai_col))) {
+    LOG_WARN("fail to push back ai col schema", K(ret));
+  }
+  return ret;
+}
+
+int ObTableSchema::get_ai_column_schema(const uint64_t column_id, const ObAiColumnSchema *&ai_col) const
+{
+  int ret = OB_ENTRY_NOT_EXIST;
+  ai_col = NULL;
+  for (int64_t i = 0; i < ai_column_array_.count(); ++i) {
+    if (ai_column_array_.at(i).get_column_id() == column_id) {
+      ai_col = &ai_column_array_.at(i);
+      ret = OB_SUCCESS;
+      break;
+    }
+  }
+  return ret;
+}
+
+int ObTableSchema::get_ai_column_schema(const common::ObString &column_name, const ObAiColumnSchema *&ai_col) const
+{
+  int ret = OB_ENTRY_NOT_EXIST;
+  ai_col = NULL;
+  for (int64_t i = 0; i < ai_column_array_.count(); ++i) {
+    if (0 == ai_column_array_.at(i).get_column_name().case_compare(column_name)) {
+      ai_col = &ai_column_array_.at(i);
+      ret = OB_SUCCESS;
+      break;
+    }
+  }
+  return ret;
+}
+
+int ObTableSchema::get_ai_column_schemas(common::ObIArray<const ObAiColumnSchema *> &ai_cols) const
+{
+  int ret = OB_SUCCESS;
+  ai_cols.reset();
+  for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_array_.count(); ++i) {
+    if (OB_FAIL(ai_cols.push_back(&ai_column_array_.at(i)))) {
+      LOG_WARN("fail to push back ai col", K(ret));
+    }
+  }
+  return ret;
+}
+
+bool ObTableSchema::is_ai_column(const uint64_t column_id) const
+{
+  bool found = false;
+  for (int64_t i = 0; !found && i < ai_column_array_.count(); ++i) {
+    if (ai_column_array_.at(i).get_column_id() == column_id) {
+      found = true;
+    }
+  }
+  return found;
 }
 
 } //enf of namespace schema

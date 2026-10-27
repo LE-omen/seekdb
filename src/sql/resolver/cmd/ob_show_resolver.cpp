@@ -150,7 +150,8 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_ENGINE)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_OPEN_TABLES)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CREATE_USER)
-            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CHECK_TABLE)) {
+            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CHECK_TABLE)
+            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_AI_COLUMNS)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
     real_id = 1;
@@ -1129,6 +1130,34 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                           OB_ALL_RECYCLEBIN_TNAME);
           }
         }();
+        break;
+      }
+      case T_SHOW_AI_COLUMNS: {
+        ObString db_name;
+        ObString tbl_name;
+        if (OB_ISNULL(parse_tree.children_[0])) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(resolve_table_info(parse_tree.children_[0], tbl_name, db_name))) {
+          LOG_WARN("fail to resolve table info", KR(ret));
+        } else {
+          if (db_name.empty() && parse_tree.children_[1] != NULL) {
+            db_name.assign_ptr(parse_tree.children_[1]->str_value_, static_cast<int32_t>(parse_tree.children_[1]->str_len_));
+          }
+          if (db_name.empty()) {
+            db_name = session_info_->get_database_name();
+          }
+          ObSqlString show_sql;
+          if (OB_FAIL(show_sql.assign_fmt(
+              "SELECT a.column_name, a.sync_mode, a.max_retries, a.raw_expr, a.normalized_expr "
+              "FROM oceanbase.__all_ai_column a "
+              "JOIN oceanbase.__all_table t ON t.table_id = a.table_id "
+              "JOIN oceanbase.__all_database d ON d.database_id = t.database_id "
+              "WHERE d.database_name = '%.*s' AND t.table_name = '%.*s'",
+              db_name.length(), db_name.ptr(),
+              tbl_name.length(), tbl_name.ptr()))) {
+          } else if (OB_FAIL(ob_write_string(*params_.allocator_, show_sql.string(), select_sql))) {
+          }
+        }
         break;
       }
       default:

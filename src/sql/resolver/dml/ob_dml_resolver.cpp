@@ -42,6 +42,8 @@
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
 #include "sql/engine/basic/ob_file_scan_utils.h"
+#include "share/ob_server_struct.h"
+#include "share/schema/ob_ai_column_schema.h"
 
 namespace oceanbase
 {
@@ -3064,6 +3066,68 @@ int ObDMLResolver::resolve_table_column_expr(const ObQualifiedName &q_name, ObRa
     }
   }
 
+  if (OB_SUCC(ret) && OB_NOT_NULL(session_info_) && session_info_->get_ai_column_strict_read()) {
+    if (OB_NOT_NULL(real_ref_expr) && real_ref_expr->is_column_ref_expr()) {
+      ObColumnRefRawExpr *col_expr = static_cast<ObColumnRefRawExpr *>(real_ref_expr);
+      uint64_t table_id = col_expr->get_table_id();
+      uint64_t column_id = col_expr->get_column_id();
+      const ObTableSchema *table_schema = NULL;
+      if (OB_NOT_NULL(schema_checker_) &&
+          OB_SUCC(schema_checker_->get_table_schema(table_id, table_schema)) &&
+          OB_NOT_NULL(table_schema) &&
+          table_schema->is_ai_column(column_id)) {
+        bool is_ready = true;
+        common::ObMySQLProxy *sql_proxy = params_.sql_proxy_ != nullptr ? params_.sql_proxy_ : GCTX.sql_proxy_;
+        if (OB_NOT_NULL(sql_proxy)) {
+          ObSqlString task_sql;
+          if (OB_SUCC(task_sql.assign_fmt(
+              "SELECT count(*) FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu",
+              table_id, column_id))) {
+            SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+              ObMySQLResult *result = NULL;
+              if (OB_SUCC(sql_proxy->read(res, task_sql.ptr()))) {
+                if (OB_NOT_NULL(result = res.get_result()) && OB_SUCC(result->next())) {
+                  int64_t task_cnt = 0;
+                  result->get_int(0, task_cnt);
+                  if (task_cnt > 0) {
+                    is_ready = false;
+                  }
+                }
+              }
+            }
+          }
+
+          if (is_ready) {
+            const ObAiColumnSchema *ai_col = NULL;
+            if (OB_SUCC(table_schema->get_ai_column_schema(column_id, ai_col)) && OB_NOT_NULL(ai_col)) {
+              const ObColumnSchemaV2 *state_col = table_schema->get_column_schema(ai_col->get_state_column_id());
+              if (OB_NOT_NULL(state_col)) {
+                ObSqlString row_sql;
+                if (OB_SUCC(row_sql.assign_fmt(
+                    "SELECT 1 FROM `%.*s`.`%.*s` WHERE `%.*s` != 2 LIMIT 1",
+                    table_schema->get_database_name().length(), table_schema->get_database_name().ptr(),
+                    table_schema->get_table_name().length(), table_schema->get_table_name().ptr(),
+                    state_col->get_column_name_str().length(), state_col->get_column_name_str().ptr()))) {
+                  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+                    ObMySQLResult *result = NULL;
+                    if (OB_SUCC(sql_proxy->read(res, row_sql.ptr()))) {
+                      if (OB_NOT_NULL(result = res.get_result()) && OB_SUCC(result->next())) {
+                        is_ready = false;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (!is_ready) {
+          ret = OB_AI_COLUMN_UNFINISHED_TASKS;
+          LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED_TASKS, table_id, column_id);
+        }
+      }
+    }
+  }
 
   return ret;
 }
@@ -5684,7 +5748,7 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
   const ColumnItem *view_column_item = NULL;
   if (OB_ISNULL(col_expr) || OB_ISNULL(dml_stmt)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (col_expr->is_generated_column()) {
+  } else if (col_expr->is_generated_column() || col_expr->is_ai_column()) {
     is_generated = true;
   } else if (OB_ISNULL(table_item = dml_stmt->get_table_item_by_id(col_expr->get_table_id()))) {
     ret = OB_ERR_UNEXPECTED;
@@ -5710,7 +5774,7 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_ISNULL(basic_column_item->expr_)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (basic_column_item->expr_->is_generated_column()) {
+    } else if (basic_column_item->expr_->is_generated_column() || basic_column_item->expr_->is_ai_column()) {
       is_generated = true;
     }
   }

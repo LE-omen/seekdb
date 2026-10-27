@@ -98,6 +98,34 @@ private:
                              const ObForeignKeyArg &fk_arg, bool &is_self_ref);
 };
 
+class ObAiColumnDmlHandle
+{
+public:
+  static int do_handle(ObTableModifyOp &op,
+                       const ObDMLBaseCtDef &dml_ctdef,
+                       ObDMLBaseRtDef &dml_rtdef,
+                       const ObDmlEventType dml_event);
+private:
+  static int handle_insert(ObTableModifyOp &op,
+                           const share::schema::ObTableSchema &table_schema,
+                           const ObDMLBaseCtDef &dml_ctdef,
+                           ObDMLBaseRtDef &dml_rtdef);
+  static int handle_update(ObTableModifyOp &op,
+                           const share::schema::ObTableSchema &table_schema,
+                           const ObDMLBaseCtDef &dml_ctdef,
+                           ObDMLBaseRtDef &dml_rtdef);
+  static int handle_delete(ObTableModifyOp &op,
+                           const share::schema::ObTableSchema &table_schema,
+                           const ObDMLBaseCtDef &dml_ctdef,
+                           ObDMLBaseRtDef &dml_rtdef);
+  static int build_rowkey_predicate(ObTableModifyOp &op,
+                                    const share::schema::ObTableSchema &table_schema,
+                                    const ObDMLBaseCtDef &dml_ctdef,
+                                    const ObExprPtrIArray &row,
+                                    common::ObIAllocator &alloc,
+                                    common::ObString &rowkey_pred);
+};
+
 class ObTableModifyOp;
 class ObTableModifySpec : public ObOpSpec
 {

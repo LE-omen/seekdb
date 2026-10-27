@@ -448,6 +448,12 @@ public:
   int get_ob_sparse_drop_ratio_search(uint64_t &ob_sparse_drop_ratio_search) const;
   int get_sql_quote_show_create(bool &sql_quote_show_create) const;
   int get_ai_column_strict_read(bool &strict_read) const;
+  bool get_ai_column_strict_read() const
+  {
+    bool strict_read = false;
+    get_ai_column_strict_read(strict_read);
+    return strict_read;
+  }
   bool is_file_sql_enabled() const { return enable_file_sql_; }
   void set_enable_file_sql(bool v) { enable_file_sql_ = v; }
   common::ObConsistencyLevel get_consistency_level() const { return consistency_level_; };

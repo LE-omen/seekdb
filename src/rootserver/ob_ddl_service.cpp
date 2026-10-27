@@ -27,6 +27,7 @@
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "share/ob_ddl_common.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
+#include "share/schema/ob_ai_column_schema.h"
 #include "sql/printer/ob_schema_printer.h"
 #include "share/autoincrement/ob_i_tablet_autoincrement_admin.h"
 #include "storage/blocksstable/index_block/ob_index_block_util.h"
@@ -8583,6 +8584,53 @@ int ObDDLService::alter_table_column(const ObTableSchema &origin_table_schema,
 
         if (OB_SUCC(ret) && is_all_column_exactly_same_type && OB_NOT_NULL(orig_column_schema)) {
           if (OB_FAIL(ObTableSchema::check_is_exactly_same_type(*orig_column_schema, new_column_schema, is_all_column_exactly_same_type))) {
+          }
+        }
+      }
+    }
+
+    if (OB_SUCC(ret) && alter_table_schema.has_ai_column()) {
+      ObSchemaService *schema_service = schema_service_->get_schema_service();
+      for (int64_t i = 0; OB_SUCC(ret) && i < alter_table_schema.get_ai_column_count(); ++i) {
+        const ObAiColumnSchema &src_ai_col = alter_table_schema.get_ai_column_schema_by_idx(i);
+        const ObColumnSchemaV2 *user_col = new_table_schema.get_column_schema(src_ai_col.get_column_name());
+        char state_name[OB_MAX_COLUMN_NAME_LENGTH + 1] = {0};
+        snprintf(state_name, sizeof(state_name), "__ai_state_%.*s",
+                 src_ai_col.get_column_name().length(), src_ai_col.get_column_name().ptr());
+        const ObColumnSchemaV2 *state_col = new_table_schema.get_column_schema(state_name);
+
+        char req_name[OB_MAX_COLUMN_NAME_LENGTH + 1] = {0};
+        snprintf(req_name, sizeof(req_name), "__ai_req_%.*s",
+                 src_ai_col.get_column_name().length(), src_ai_col.get_column_name().ptr());
+        const ObColumnSchemaV2 *req_col = new_table_schema.get_column_schema(req_name);
+
+        char spec_name[OB_MAX_COLUMN_NAME_LENGTH + 1] = {0};
+        snprintf(spec_name, sizeof(spec_name), "__ai_spec_%.*s",
+                 src_ai_col.get_column_name().length(), src_ai_col.get_column_name().ptr());
+        const ObColumnSchemaV2 *spec_col = new_table_schema.get_column_schema(spec_name);
+
+        if (OB_NOT_NULL(user_col) && OB_NOT_NULL(state_col) &&
+            OB_NOT_NULL(req_col) && OB_NOT_NULL(spec_col)) {
+          ObAiColumnSchema new_ai_col(allocator);
+          if (OB_FAIL(new_ai_col.assign(src_ai_col))) {
+          } else {
+            new_ai_col.set_table_id(new_table_schema.get_table_id());
+            new_ai_col.set_column_id(user_col->get_column_id());
+            new_ai_col.set_state_column_id(state_col->get_column_id());
+            new_ai_col.set_request_column_id(req_col->get_column_id());
+            new_ai_col.set_result_spec_column_id(spec_col->get_column_id());
+            if (OB_FAIL(new_table_schema.add_ai_column(new_ai_col))) {
+              LOG_WARN("fail to add ai col to new_table_schema", K(ret));
+            } else if (OB_NOT_NULL(schema_service)) {
+              ObDMLSqlSplicer ai_dml;
+              int64_t affected_rows = 0;
+              ObDMLExecHelper exec(trans);
+              if (OB_FAIL(schema_service->get_table_sql_service().gen_ai_column_dml(new_ai_col, ai_dml))) {
+                LOG_WARN("fail to gen ai column dml", K(ret));
+              } else if (OB_FAIL(exec.exec_insert(OB_ALL_AI_COLUMN_TNAME, ai_dml, affected_rows))) {
+                LOG_WARN("fail to exec insert ai column", K(ret));
+              }
+            }
           }
         }
       }

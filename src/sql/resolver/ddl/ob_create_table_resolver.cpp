@@ -834,6 +834,15 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             }
           }
 
+          if (OB_SUCC(ret) && column.is_ai_column()) {
+            uint64_t state_cid = gen_column_id();
+            uint64_t req_cid = gen_column_id();
+            uint64_t spec_cid = gen_column_id();
+            if (OB_FAIL(resolve_ai_column(element, column, table_schema, state_cid, req_cid, spec_cid))) {
+              LOG_WARN("fail to resolve ai column in create table", K(ret));
+            }
+          }
+
           if (OB_SUCC(ret) && !column.is_invisible_column()) {
             has_visible_col = true;
           }

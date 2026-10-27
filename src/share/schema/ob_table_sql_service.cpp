@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_table_sql_service.h"
+#include "ob_ai_column_schema.h"
 #include "lib/literals/ob_literals.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
@@ -694,6 +695,7 @@ int ObTableSqlService::drop_table(const ObTableSchema &table_schema,
                        sql_client, table_id,
                        table_schema.get_column_count(),
                        true))) {
+    } else if (OB_FAIL(delete_from_all_ai_column(sql_client, table_id))) {
     }
   }
 
@@ -909,6 +911,19 @@ int ObTableSqlService::insert_single_column(
     if (OB_FAIL(log_operation_wrapper(opt, sql_client))) {
     }
   }
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column()) {
+    const ObAiColumnSchema *ai_col = new_table_schema.get_ai_column_schema(new_column_schema.get_column_id());
+    if (OB_NOT_NULL(ai_col)) {
+      ObDMLSqlSplicer ai_dml;
+      int64_t affected_rows = 0;
+      ObDMLExecHelper exec(sql_client);
+      if (OB_FAIL(gen_ai_column_dml(*ai_col, ai_dml))) {
+        LOG_WARN("fail to gen ai column dml", K(ret));
+      } else if (OB_FAIL(exec.exec_insert(OB_ALL_AI_COLUMN_TNAME, ai_dml, affected_rows))) {
+        LOG_WARN("fail to exec insert ai column", K(ret));
+      }
+    }
+  }
   return ret;
 }
 
@@ -986,6 +1001,17 @@ int ObTableSqlService::update_single_column(
       opt.op_type_ = OB_DDL_MODIFY_COLUMN;
       opt.schema_version_ = new_column_schema.get_schema_version();
       if (OB_FAIL(log_operation_wrapper(opt, sql_client))) {
+      }
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column()) {
+    const ObAiColumnSchema *ai_col = new_table_schema.get_ai_column_schema(new_column_schema.get_column_id());
+    if (OB_NOT_NULL(ai_col)) {
+      ObDMLSqlSplicer ai_dml;
+      int64_t affected_rows = 0;
+      ObDMLExecHelper exec(sql_client);
+      if (OB_FAIL(gen_ai_column_dml(*ai_col, ai_dml))) {
+        LOG_WARN("fail to gen ai column dml", K(ret));
+      } else if (OB_FAIL(exec.exec_insert_update(OB_ALL_AI_COLUMN_TNAME, ai_dml, affected_rows))) {
+        LOG_WARN("fail to exec insert_update ai column", K(ret));
       }
     }
   }
@@ -2005,6 +2031,12 @@ int ObTableSqlService::delete_single_column(
     }
   }
 
+  if (OB_SUCC(ret) && orig_column_schema.is_ai_column()) {
+    int64_t ai_affected_rows = 0;
+    ObDMLExecHelper exec(sql_client);
+    (void) exec.exec_delete(OB_ALL_AI_COLUMN_TNAME, dml, ai_affected_rows);
+  }
+
   if (OB_SUCC(ret)) {
     if (OB_FAIL(delete_column_stat(sql_client, table_id, column_id))) {
     }
@@ -2151,6 +2183,8 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     } else if (FALSE_IT(time_guard.click("insert_all_table"))) {
     } else if (OB_FAIL(batch_add_columns_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_column"))) {
+    } else if (OB_FAIL(batch_add_ai_columns_for_create_table(sql_client, tables))) {
+    } else if (FALSE_IT(time_guard.click("insert_all_ai_column"))) {
     } else if (OB_FAIL(batch_add_constraints_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_cst"))) {
     } else if (OB_FAIL(batch_add_table_part_info(sql_client, tables))) {
@@ -4669,6 +4703,82 @@ int ObTableSqlService::update_view_columns(ObISQLClient &sql_client,
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(sql_client.write(column_history_sql.ptr(), affected_rows))) {
   } else if (affected_rows != table.get_column_count()) {
+  }
+  return ret;
+}
+
+int ObTableSqlService::gen_ai_column_dml(
+    const ObAiColumnSchema &ai_col,
+    share::ObDMLSqlSplicer &dml)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(ai_col.get_table_id())))
+      || OB_FAIL(dml.add_pk_column("column_id", ai_col.get_column_id()))
+      || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(ai_col.get_column_name())))
+      || OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(ai_col.get_sync_mode())))
+      || OB_FAIL(dml.add_column("max_retries", ai_col.get_max_retries()))
+      || OB_FAIL(dml.add_column("state_column_id", ai_col.get_state_column_id()))
+      || OB_FAIL(dml.add_column("request_column_id", ai_col.get_request_column_id()))
+      || OB_FAIL(dml.add_column("result_spec_column_id", ai_col.get_result_spec_column_id()))
+      || OB_FAIL(dml.add_column("raw_expr", ObHexEscapeSqlStr(ai_col.get_raw_expr())))
+      || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(ai_col.get_normalized_expr())))
+      || OB_FAIL(dml.add_gmt_create())
+      || OB_FAIL(dml.add_gmt_modified())) {
+    LOG_WARN("fail to add column to dml", K(ret));
+  }
+  return ret;
+}
+
+int ObTableSqlService::add_ai_columns(ObISQLClient &sql_client, const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  if (table.has_ai_column()) {
+    ObDMLExecHelper exec(sql_client);
+    const ObIArray<ObAiColumnSchema> &ai_cols = table.get_ai_column_array();
+    for (int64_t i = 0; OB_SUCC(ret) && i < ai_cols.count(); ++i) {
+      ObDMLSqlSplicer dml;
+      int64_t affected_rows = 0;
+      if (OB_FAIL(gen_ai_column_dml(ai_cols.at(i), dml))) {
+        LOG_WARN("fail to gen ai column dml", K(ret));
+      } else if (OB_FAIL(exec.exec_insert(OB_ALL_AI_COLUMN_TNAME, dml, affected_rows))) {
+        LOG_WARN("fail to exec insert ai column", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::batch_add_ai_columns_for_create_table(
+    common::ObISQLClient &sql_client,
+    const ObIArray<ObTableSchema> &tables)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    const ObTableSchema &table = tables.at(i);
+    if (table.has_ai_column()) {
+      if (OB_FAIL(add_ai_columns(sql_client, table))) {
+        LOG_WARN("fail to add ai columns for table", K(ret), K(table.get_table_id()));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::delete_from_all_ai_column(
+    common::ObISQLClient &sql_client,
+    const uint64_t table_id)
+{
+  int ret = OB_SUCCESS;
+  if (!is_core_table(table_id)) {
+    ObDMLSqlSplicer dml;
+    if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(table_id)))) {
+    } else {
+      int64_t affected_rows = 0;
+      if (OB_FAIL(exec_delete(sql_client, table_id,
+                              OB_ALL_AI_COLUMN_TNAME, dml, affected_rows))) {
+        LOG_WARN("fail to exec delete from all_ai_column", K(ret), K(table_id));
+      }
+    }
   }
   return ret;
 }
