@@ -97,8 +97,13 @@ int ObExplainLogPlan::generate_normal_raw_plan()
             }
 
             bool is_null = false;
-            if (vdef != NULL && i < vdef->column_nnvs_.count()) {
-              is_null = (vdef->column_nnvs_.at(i) > 0);
+            int64_t col_idx = i;
+            if (s_item.expr_ != NULL && s_item.expr_->is_column_ref_expr()) {
+              const ObColumnRefRawExpr *c_ref = static_cast<const ObColumnRefRawExpr*>(s_item.expr_);
+              col_idx = c_ref->get_column_id() - OB_APP_MIN_COLUMN_ID;
+            }
+            if (vdef != NULL && col_idx >= 0 && col_idx < vdef->column_nnvs_.count()) {
+              is_null = (vdef->column_nnvs_.at(col_idx) > 0);
             }
             ObObj *cells = static_cast<ObObj*>(get_allocator().alloc(sizeof(ObObj) * 6));
             if (OB_ISNULL(cells)) {

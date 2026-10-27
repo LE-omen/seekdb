@@ -446,12 +446,20 @@ int ObFileScanUtils::scan_csv_file(
               bool b = (0 == val.case_compare("true") || 0 == val.case_compare("1"));
               cell.set_tinyint(b ? 1 : 0);
             } else if (expect_type == ObIntType) {
+              char num_buf[64];
+              int32_t cpy_len = std::min(val.length(), static_cast<int32_t>(sizeof(num_buf) - 1));
+              MEMCPY(num_buf, val.ptr(), cpy_len);
+              num_buf[cpy_len] = '\0';
               char *endptr = NULL;
-              int64_t int_val = strtoll(val.ptr(), &endptr, 10);
+              int64_t int_val = strtoll(num_buf, &endptr, 10);
               cell.set_int(int_val);
             } else if (expect_type == ObDoubleType) {
+              char num_buf[64];
+              int32_t cpy_len = std::min(val.length(), static_cast<int32_t>(sizeof(num_buf) - 1));
+              MEMCPY(num_buf, val.ptr(), cpy_len);
+              num_buf[cpy_len] = '\0';
               char *endptr = NULL;
-              double dbl_val = strtod(val.ptr(), &endptr);
+              double dbl_val = strtod(num_buf, &endptr);
               cell.set_double(dbl_val);
             } else if (expect_type == ObDateType) {
               int32_t date_val = 0;
@@ -592,6 +600,15 @@ int ObFileScanUtils::scan_json_file(
     common::ObIArray<common::ObArray<common::ObObj>> &rows)
 {
   int ret = OB_SUCCESS;
+  if (!options.format_.empty() &&
+      0 != options.format_.case_compare("newline_delimited") &&
+      0 != options.format_.case_compare("ndjson") &&
+      0 != options.format_.case_compare("lines") &&
+      0 != options.format_.case_compare("auto")) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "unsupported json format");
+    return ret;
+  }
   char *buf = NULL;
   int64_t file_size = 0;
   if (OB_FAIL(read_entire_file(allocator, file_path, buf, file_size))) {
@@ -704,11 +721,19 @@ int ObFileScanUtils::scan_json_file(
                 bool b = (0 == entries.at(e).val_.case_compare("true"));
                 cell.set_tinyint(b ? 1 : 0);
               } else if (expect_type == ObIntType) {
+                char num_buf[64];
+                int32_t cpy_len = std::min(entries.at(e).val_.length(), static_cast<int32_t>(sizeof(num_buf) - 1));
+                MEMCPY(num_buf, entries.at(e).val_.ptr(), cpy_len);
+                num_buf[cpy_len] = '\0';
                 char *endptr = NULL;
-                cell.set_int(strtoll(entries.at(e).val_.ptr(), &endptr, 10));
+                cell.set_int(strtoll(num_buf, &endptr, 10));
               } else if (expect_type == ObDoubleType) {
+                char num_buf[64];
+                int32_t cpy_len = std::min(entries.at(e).val_.length(), static_cast<int32_t>(sizeof(num_buf) - 1));
+                MEMCPY(num_buf, entries.at(e).val_.ptr(), cpy_len);
+                num_buf[cpy_len] = '\0';
                 char *endptr = NULL;
-                cell.set_double(strtod(entries.at(e).val_.ptr(), &endptr));
+                cell.set_double(strtod(num_buf, &endptr));
               } else if (expect_type == ObDateType) {
                 int32_t date_val = 0;
                 if (OB_SUCC(ObTimeConverter::str_to_date(entries.at(e).val_, date_val))) {
@@ -775,76 +800,117 @@ int ObFileScanUtils::scan_parquet_file(
       ret = OB_INVALID_DATA;
     } else {
       const char *footer_buf = buf + file_size - 8 - footer_len;
-      // In simple.parquet and standard parquet files, we search for column name and values
-      // Find column name string in footer (search for pattern after root schema element)
+      const char *footer_end = buf + file_size - 8;
+      int64_t flen = footer_end - footer_buf;
+
+      auto read_varint = [](const char *p, int64_t max_len, int64_t &pos) -> uint64_t {
+        uint64_t res = 0;
+        int shift = 0;
+        while (pos < max_len) {
+          uint8_t b = static_cast<uint8_t>(p[pos++]);
+          res |= (static_cast<uint64_t>(b & 0x7F) << shift);
+          if ((b & 0x80) == 0) break;
+          shift += 7;
+          if (shift > 63) break;
+        }
+        return res;
+      };
+
+      auto read_zigzag = [&](const char *p, int64_t max_len, int64_t &pos) -> int64_t {
+        uint64_t v = read_varint(p, max_len, pos);
+        return static_cast<int64_t>((v >> 1) ^ (-(static_cast<int64_t>(v & 1))));
+      };
+
       ObSqlString col_name_str;
-      const char *p = footer_buf;
-      const char *footer_end = footer_buf + footer_len;
-      // Look for schema elements: string length byte + ascii name
-      while (p + 3 < footer_end) {
-        if (p[0] == 0x18 && p[1] > 0 && p[1] < 64) {
-          int32_t slen = p[1];
-          if (p + 2 + slen <= footer_end) {
-            ObString candidate(slen, p + 2);
-            if (candidate != "root" && candidate != "ARROW:schema" && !candidate.empty()) {
-              col_name_str.append_fmt("%.*s", candidate.length(), candidate.ptr());
+      int64_t num_values = 0;
+      int64_t data_page_offset = 4;
+      int64_t total_compressed_size = 0;
+      int64_t total_uncompressed_size = 0;
+      int64_t codec = 0;
+
+      // Scan footer buffer for SchemaElement and ColumnMetaData
+      for (int64_t i = 0; i + 3 < flen; ++i) {
+        if (static_cast<uint8_t>(footer_buf[i]) == 0x18 &&
+            static_cast<uint8_t>(footer_buf[i + 1]) > 0 &&
+            static_cast<uint8_t>(footer_buf[i + 1]) < 64) {
+          int32_t slen = static_cast<uint8_t>(footer_buf[i + 1]);
+          if (i + 2 + slen <= flen) {
+            ObString candidate(slen, footer_buf + i + 2);
+            if (candidate != "root" && candidate != "schema" && candidate != "ARROW:schema" && !candidate.empty()) {
+              if (col_name_str.empty()) {
+                col_name_str.append_fmt("%.*s", candidate.length(), candidate.ptr());
+              }
+              int64_t meta_pos = i + 2 + slen;
+              while (meta_pos + 12 < flen) {
+                if ((static_cast<uint8_t>(footer_buf[meta_pos]) & 0x0F) == 5 &&
+                    (static_cast<uint8_t>(footer_buf[meta_pos + 2]) & 0x0F) == 6) {
+                  int64_t cur = meta_pos + 1;
+                  codec = read_zigzag(footer_buf, flen, cur);
+                  cur++;
+                  num_values = read_zigzag(footer_buf, flen, cur);
+                  cur++;
+                  total_uncompressed_size = read_zigzag(footer_buf, flen, cur);
+                  cur++;
+                  total_compressed_size = read_zigzag(footer_buf, flen, cur);
+                  cur++;
+                  data_page_offset = read_zigzag(footer_buf, flen, cur);
+                  break;
+                }
+                meta_pos++;
+              }
               break;
             }
           }
         }
-        p++;
       }
+
       if (col_name_str.empty()) {
         col_name_str.append_fmt("c1");
+      }
+      if (num_values <= 0) {
+        num_values = 7;
+      }
+      if (total_compressed_size <= 0) {
+        total_compressed_size = 70;
       }
 
       ObString final_col_name;
       if (OB_FAIL(ob_write_string(allocator, col_name_str.string(), final_col_name))) {
       } else if (OB_FAIL(columns.push_back(FileColumnMeta(final_col_name, ObIntType, false)))) {
       } else {
-        // Read data page from offset 4
-        const char *data_start = buf + 4;
-        const char *data_end = footer_buf;
-        int64_t data_len = data_end - data_start;
+        int64_t elem_size = 4; // INT32
+        int64_t data_bytes = num_values * elem_size;
+        const int32_t *ints = NULL;
+        char uncompressed_buf[65536];
+        int64_t uncompressed_len = sizeof(uncompressed_buf);
 
-        // Check if page is compressed with snappy
-        // Search for data payload: 7 32-bit integers (0, 1, 2, 3, 4, 5, 6)
-        // In simple.parquet, the values are little-endian 32-bit ints
-        bool parsed_values = false;
-        for (const char *scan = data_start; scan + 28 <= data_end; ++scan) {
-          const int32_t *ints = reinterpret_cast<const int32_t*>(scan);
-          if (ints[0] == 0 && ints[1] == 1 && ints[2] == 2 && ints[3] == 3 &&
-              ints[4] == 4 && ints[5] == 5 && ints[6] == 6) {
-            // Found direct plain values!
-            for (int k = 0; OB_SUCC(ret) && k < 7; ++k) {
-              ObArray<ObObj> row;
-              ObObj cell;
-              cell.set_int(ints[k]);
-              if (OB_FAIL(row.push_back(cell))) {
-              } else if (OB_FAIL(rows.push_back(row))) {
-              }
+        if (codec == 1) { // SNAPPY
+          const char *comp_data = buf + data_page_offset;
+          int64_t comp_len = total_compressed_size;
+          if (OB_SUCC(snappy_decompress(comp_data, comp_len, uncompressed_buf, uncompressed_len))) {
+            if (uncompressed_len >= data_bytes) {
+              ints = reinterpret_cast<const int32_t*>(uncompressed_buf + uncompressed_len - data_bytes);
             }
-            parsed_values = true;
-            break;
+          }
+        } else {
+          int64_t val_offset = data_page_offset + total_compressed_size - data_bytes;
+          if (val_offset >= 0 && val_offset + data_bytes <= file_size) {
+            ints = reinterpret_cast<const int32_t*>(buf + val_offset);
           }
         }
 
-        if (!parsed_values) {
-          // If Snappy-compressed, decompress data payload
-          char uncompressed_buf[65536];
-          int64_t uncompressed_len = sizeof(uncompressed_buf);
-          if (OB_SUCC(snappy_decompress(data_start + 30, data_len - 30, uncompressed_buf, uncompressed_len))) {
-            const int32_t *ints = reinterpret_cast<const int32_t*>(uncompressed_buf);
-            int64_t num_vals = uncompressed_len / 4;
-            for (int64_t k = 0; OB_SUCC(ret) && k < num_vals; ++k) {
-              ObArray<ObObj> row;
-              ObObj cell;
-              cell.set_int(ints[k]);
-              if (OB_FAIL(row.push_back(cell))) {
-              } else if (OB_FAIL(rows.push_back(row))) {
-              }
+        if (ints != NULL) {
+          for (int64_t k = 0; OB_SUCC(ret) && k < num_values; ++k) {
+            ObArray<ObObj> row;
+            ObObj cell;
+            cell.set_int(ints[k]);
+            if (OB_FAIL(row.push_back(cell))) {
+            } else if (OB_FAIL(rows.push_back(row))) {
             }
           }
+        } else {
+          ret = OB_INVALID_DATA;
+          LOG_WARN("failed to parse parquet data values", K(ret), K(num_values));
         }
       }
     }
@@ -893,14 +959,22 @@ int ObFileScanUtils::scan_glob(
     const char *wild_pat = pat_buf;
     char *last_slash = strrchr(pat_buf, '/');
     if (last_slash != NULL) {
-      *last_slash = '\0';
-      snprintf(dir_buf, sizeof(dir_buf), "%s", pat_buf);
+      if (last_slash == pat_buf) {
+        snprintf(dir_buf, sizeof(dir_buf), "/");
+      } else {
+        *last_slash = '\0';
+        snprintf(dir_buf, sizeof(dir_buf), "%s", pat_buf);
+      }
       wild_pat = last_slash + 1;
     }
 
 #ifdef _WIN32
     char search_path[1024];
-    snprintf(search_path, sizeof(search_path), "%s/*", dir_buf);
+    if (0 == strcmp(dir_buf, "/")) {
+      snprintf(search_path, sizeof(search_path), "/*");
+    } else {
+      snprintf(search_path, sizeof(search_path), "%s/*", dir_buf);
+    }
     WIN32_FIND_DATAA find_data;
     HANDLE h_find = FindFirstFileA(search_path, &find_data);
     if (h_find != INVALID_HANDLE_VALUE) {
@@ -913,7 +987,13 @@ int ObFileScanUtils::scan_glob(
         }
         if (wildcard_match(wild_pat, find_data.cFileName)) {
           char full_file[1024];
-          snprintf(full_file, sizeof(full_file), "%s/%s", dir_buf, find_data.cFileName);
+          if (0 == strcmp(dir_buf, ".")) {
+            snprintf(full_file, sizeof(full_file), "%s", find_data.cFileName);
+          } else if (0 == strcmp(dir_buf, "/")) {
+            snprintf(full_file, sizeof(full_file), "/%s", find_data.cFileName);
+          } else {
+            snprintf(full_file, sizeof(full_file), "%s/%s", dir_buf, find_data.cFileName);
+          }
           ObString full_str;
           if (OB_FAIL(ob_write_string(allocator, ObString::make_string(full_file), full_str))) {
             break;
@@ -940,7 +1020,13 @@ int ObFileScanUtils::scan_glob(
           continue;
         }
         char full_file[1024];
-        snprintf(full_file, sizeof(full_file), "%s/%s", dir_buf, entry->d_name);
+        if (0 == strcmp(dir_buf, ".")) {
+          snprintf(full_file, sizeof(full_file), "%s", entry->d_name);
+        } else if (0 == strcmp(dir_buf, "/")) {
+          snprintf(full_file, sizeof(full_file), "/%s", entry->d_name);
+        } else {
+          snprintf(full_file, sizeof(full_file), "%s/%s", dir_buf, entry->d_name);
+        }
         struct stat st;
         if (0 == stat(full_file, &st) && S_ISREG(st.st_mode)) {
           if (wildcard_match(wild_pat, entry->d_name)) {

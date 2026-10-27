@@ -134,4 +134,23 @@ TEST_F(TestFileSqlParser, ParseCopyTo)
   ParseNode *copy_stmt2 = result.result_tree_->children_[0];
   ASSERT_TRUE(copy_stmt2 != NULL);
   ASSERT_EQ(T_COPY_TO_FILE, copy_stmt2->type_);
+
+  const char *sql3 = "COPY (select id, name from read_csv('/tmp/test.csv') order by id) TO '/tmp/export.csv' (format csv, header, nullstr 'NULL');";
+  int ret3 = parse(sql3, result, allocator);
+  ASSERT_EQ(OB_SUCCESS, ret3);
+  ASSERT_TRUE(result.result_tree_ != NULL);
+  ParseNode *copy_stmt3 = result.result_tree_->children_[0];
+  ASSERT_TRUE(copy_stmt3 != NULL);
+  ASSERT_EQ(T_COPY_TO_FILE, copy_stmt3->type_);
 }
+
+TEST_F(TestFileSqlParser, ParseNegativeSampleSize)
+{
+  ObArenaAllocator allocator;
+  ParseResult result;
+  const char *sql = "SELECT count(*) FROM read_csv('/tmp/test.csv', header = true, sample_size = -1);";
+  int ret = parse(sql, result, allocator);
+  ASSERT_EQ(OB_SUCCESS, ret);
+  ASSERT_TRUE(result.result_tree_ != NULL);
+}
+

@@ -12879,9 +12879,19 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
                 options.has_header_ = (val_node->value_ != 0);
               } else if (T_INT == val_node->type_) {
                 options.has_header_ = (val_node->value_ != 0);
+              } else if ((T_VARCHAR == val_node->type_ || T_CHAR == val_node->type_) && val_node->str_value_ != NULL) {
+                options.has_header_ = (0 == strncasecmp(val_node->str_value_, "true", 4) ||
+                                       0 == strncmp(val_node->str_value_, "1", 1));
               }
             } else if (0 == arg_name.case_compare("sample_size")) {
-              int64_t sample_size = val_node->value_;
+              int64_t sample_size = 0;
+              if (T_INT == val_node->type_) {
+                sample_size = val_node->value_;
+              } else if (T_OP_NEG == val_node->type_ && val_node->num_child_ > 0 && val_node->children_[0] != NULL) {
+                sample_size = -(val_node->children_[0]->value_);
+              } else {
+                sample_size = val_node->value_;
+              }
               if (sample_size != -1) {
                 ret = OB_NOT_SUPPORTED;
                 LOG_USER_ERROR(OB_NOT_SUPPORTED, "sample_size other than -1 is not supported");
@@ -12909,7 +12919,8 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &table_node, TableIte
       if (OB_SUCC(ret)) {
         ObString secure_file_priv;
         if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
-        } else if (!session_info_->is_inner() && OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, file_path))) {
+        } else if (!secure_file_priv.empty() && 0 != secure_file_priv.case_compare(N_NULL) &&
+                   !session_info_->is_inner() && OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, file_path))) {
         }
       }
 

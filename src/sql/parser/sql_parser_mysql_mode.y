@@ -17629,6 +17629,7 @@ copy_source:
 opt_copy_options:
   /* empty */ { $$ = NULL; }
 | '(' copy_option_list ')' { $$ = $2; }
+| WITH '(' copy_option_list ')' { $$ = $3; }
 ;
 
 copy_option_list:

@@ -81,6 +81,7 @@ int ObCopyToFileResolver::resolve(const ParseNode &parse_tree)
               col_name.assign_ptr(const_cast<char*>(project_node->str_value_), static_cast<int32_t>(project_node->str_len_));
             }
             if (!col_name.empty()) {
+              col_name = col_name.trim();
               ObString name_copy;
               if (OB_FAIL(ob_write_string(*allocator_, col_name, name_copy))) {
               } else if (OB_FAIL(copy_stmt->add_column_name(name_copy))) {
@@ -106,7 +107,8 @@ int ObCopyToFileResolver::resolve(const ParseNode &parse_tree)
       if (OB_SUCC(ret)) {
         ObString secure_file_priv;
         if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
-        } else if (!session_info_->is_inner() && OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, target_file))) {
+        } else if (!secure_file_priv.empty() && 0 != secure_file_priv.case_compare(N_NULL) &&
+                   !session_info_->is_inner() && OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, target_file))) {
         }
       }
 
@@ -128,7 +130,17 @@ int ObCopyToFileResolver::resolve(const ParseNode &parse_tree)
           if (opt_item->num_child_ >= 1 && OB_NOT_NULL(opt_item->children_[0])) {
             ObString opt_name(opt_item->children_[0]->str_len_, opt_item->children_[0]->str_value_);
             if (0 == opt_name.case_compare("header")) {
-              options.has_header_ = true;
+              if (opt_item->num_child_ >= 2 && opt_item->children_[1] != NULL) {
+                const ParseNode *vnode = opt_item->children_[1];
+                if (T_BOOL == vnode->type_ || T_INT == vnode->type_) {
+                  options.has_header_ = (vnode->value_ != 0);
+                } else if (vnode->str_value_ != NULL) {
+                  options.has_header_ = (0 == strncasecmp(vnode->str_value_, "true", 4) ||
+                                         0 == strncmp(vnode->str_value_, "1", 1));
+                }
+              } else {
+                options.has_header_ = true;
+              }
             } else if (0 == opt_name.case_compare("format") && opt_item->num_child_ >= 2) {
               const ParseNode *vnode = opt_item->children_[1];
               if (OB_NOT_NULL(vnode)) {
