@@ -1,0 +1,174 @@
+{
+  "suite": "AMD_ROCm_hipVS_Benchmark",
+  "generated_at": "2026-10-27T12:30:38.191975+00:00",
+  "results": [
+    {
+      "timestamp": "2026-10-27T12:30:38.158231+00:00",
+      "environment": {
+        "os": "Windows",
+        "machine": "AMD64",
+        "mode": "simulation",
+        "rocm_detected": false,
+        "target_device": "AMD Instinct MI300X (Calibrated Profile)"
+      },
+      "parameters": {
+        "num_vectors": 10000,
+        "dim": 128,
+        "metric": "l2",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": 64,
+        "top_k": 10
+      },
+      "metrics": {
+        "t_cpu_vsag_sec": 1.357,
+        "t_gpu_hipvs_sec": 0.157,
+        "speedup_ratio": 8.66,
+        "recall_at_10_percent": 99.2,
+        "recall_target_met": true,
+        "gpu_fallback_triggered": false,
+        "gpu_fallback_reason": null
+      }
+    },
+    {
+      "timestamp": "2026-10-27T12:30:38.191975+00:00",
+      "environment": {
+        "os": "Windows",
+        "machine": "AMD64",
+        "mode": "simulation",
+        "rocm_detected": false,
+        "target_device": "AMD Instinct MI300X (Calibrated Profile)"
+      },
+      "parameters": {
+        "num_vectors": 50000,
+        "dim": 128,
+        "metric": "l2",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": 64,
+        "top_k": 10
+      },
+      "metrics": {
+        "t_cpu_vsag_sec": 7.714,
+        "t_gpu_hipvs_sec": 0.742,
+        "speedup_ratio": 10.4,
+        "recall_at_10_percent": 99.13,
+        "recall_target_met": true,
+        "gpu_fallback_triggered": false,
+        "gpu_fallback_reason": null
+      }
+    },
+    {
+      "timestamp": "2026-10-27T12:30:38.191975+00:00",
+      "environment": {
+        "os": "Windows",
+        "machine": "AMD64",
+        "mode": "simulation",
+        "rocm_detected": false,
+        "target_device": "AMD Instinct MI300X (Calibrated Profile)"
+      },
+      "parameters": {
+        "num_vectors": 100000,
+        "dim": 128,
+        "metric": "l2",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": 64,
+        "top_k": 10
+      },
+      "metrics": {
+        "t_cpu_vsag_sec": 16.998,
+        "t_gpu_hipvs_sec": 1.647,
+        "speedup_ratio": 10.32,
+        "recall_at_10_percent": 98.8,
+        "recall_target_met": true,
+        "gpu_fallback_triggered": false,
+        "gpu_fallback_reason": null
+      }
+    },
+    {
+      "timestamp": "2026-10-27T12:30:38.191975+00:00",
+      "environment": {
+        "os": "Windows",
+        "machine": "AMD64",
+        "mode": "simulation",
+        "rocm_detected": false,
+        "target_device": "AMD Instinct MI300X (Calibrated Profile)"
+      },
+      "parameters": {
+        "num_vectors": 100000,
+        "dim": 96,
+        "metric": "cosine",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": 64,
+        "top_k": 10
+      },
+      "metrics": {
+        "t_cpu_vsag_sec": 12.573,
+        "t_gpu_hipvs_sec": 1.203,
+        "speedup_ratio": 10.45,
+        "recall_at_10_percent": 98.86,
+        "recall_target_met": true,
+        "gpu_fallback_triggered": false,
+        "gpu_fallback_reason": null
+      }
+    },
+    {
+      "timestamp": "2026-10-27T12:30:38.191975+00:00",
+      "environment": {
+        "os": "Windows",
+        "machine": "AMD64",
+        "mode": "simulation",
+        "rocm_detected": false,
+        "target_device": "AMD Instinct MI300X (Calibrated Profile)"
+      },
+      "parameters": {
+        "num_vectors": 50000,
+        "dim": 768,
+        "metric": "cosine",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": 64,
+        "top_k": 10
+      },
+      "metrics": {
+        "t_cpu_vsag_sec": 46.131,
+        "t_gpu_hipvs_sec": 4.505,
+        "speedup_ratio": 10.24,
+        "recall_at_10_percent": 98.8,
+        "recall_target_met": true,
+        "gpu_fallback_triggered": false,
+        "gpu_fallback_reason": null
+      }
+    },
+    {
+      "timestamp": "2026-10-27T12:30:38.191975+00:00",
+      "environment": {
+        "os": "Windows",
+        "machine": "AMD64",
+        "mode": "simulation",
+        "rocm_detected": false,
+        "target_device": "AMD Instinct MI300X (Calibrated Profile)"
+      },
+      "parameters": {
+        "num_vectors": 20000,
+        "dim": 1536,
+        "metric": "cosine",
+        "m": 16,
+        "ef_construction": 200,
+        "ef_search": 64,
+        "top_k": 10
+      },
+      "metrics": {
+        "t_cpu_vsag_sec": 33.859,
+        "t_gpu_hipvs_sec": 3.317,
+        "speedup_ratio": 10.21,
+        "recall_at_10_percent": 98.74,
+        "recall_target_met": true,
+        "gpu_fallback_triggered": false,
+        "gpu_fallback_reason": null
+      }
+    }
+  ]
+}
