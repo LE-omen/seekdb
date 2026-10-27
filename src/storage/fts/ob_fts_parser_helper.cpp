@@ -315,6 +315,7 @@ ObFTParseHelper::ObFTParseHelper()
     parser_name_(),
     add_word_flag_(),
     parser_property_(),
+    cached_iter_(nullptr),
     is_inited_(false)
 {
 }
@@ -342,6 +343,7 @@ int ObFTParseHelper::init(
   } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
   } else {
     allocator_ = allocator;
+    cached_iter_ = nullptr;
     is_inited_ = true;
   }
   if (OB_FAIL(ret) && OB_UNLIKELY(!is_inited_)) {
@@ -352,6 +354,14 @@ int ObFTParseHelper::init(
 
 void ObFTParseHelper::reset()
 {
+  if (OB_NOT_NULL(cached_iter_)) {
+    if (OB_NOT_NULL(parser_desc_) && OB_NOT_NULL(allocator_)) {
+      ObFTParserParam param;
+      param.allocator_ = allocator_;
+      parser_desc_->free_token_iter(&param, cached_iter_);
+    }
+    cached_iter_ = nullptr;
+  }
   parser_desc_ = nullptr;
   allocator_ = nullptr;
   add_word_flag_.clear();
@@ -376,19 +386,67 @@ int ObFTParseHelper::segment(
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_ISNULL(cs = common::ObCharset::get_charset(type))) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (0 >= fulltext_len || OB_ISNULL(fulltext)) {
+    words.reuse();
+    doc_length = 0;
   } else {
     words.reuse();
     ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
-    if (OB_FAIL(segment(
-                    parser_property_,
-                    parser_name_.get_parser_version(),
-                    parser_desc_,
-                    cs,
-                    fulltext,
-                    fulltext_len,
-                    *allocator_,
-                    add_word))) {
-    } else {
+
+    ObFTParserParam param;
+    param.allocator_ = allocator_;
+    param.cs_ = cs;
+    param.fulltext_ = fulltext;
+    param.ft_length_ = fulltext_len;
+    param.parser_version_ = parser_name_.get_parser_version();
+    param.ngram_token_size_ = parser_property_.ngram_token_size_;
+    param.ik_param_.mode_
+        = (parser_property_.ik_mode_smart_ ? ObFTIKParam::Mode::SMART : ObFTIKParam::Mode::MAX_WORD);
+    param.min_ngram_size_ = parser_property_.min_ngram_token_size_;
+    param.max_ngram_size_ = parser_property_.max_ngram_token_size_;
+
+    ObITokenIterator *iter = cached_iter_;
+    bool is_reused = false;
+    if (OB_NOT_NULL(iter)) {
+      if (OB_SUCC(parser_desc_->reuse_token_iter(&param, iter))) {
+        is_reused = true;
+      } else {
+        parser_desc_->free_token_iter(&param, iter);
+        iter = nullptr;
+        cached_iter_ = nullptr;
+      }
+    }
+
+    if (!is_reused) {
+      if (OB_FAIL(parser_desc_->segment(&param, iter))) {
+      } else {
+        cached_iter_ = iter;
+      }
+    }
+
+    if (OB_SUCC(ret) && OB_NOT_NULL(iter)) {
+      const char *word = nullptr;
+      int64_t word_len = 0;
+      int64_t char_cnt = 0;
+      int64_t word_freq = 0;
+      while (OB_SUCC(ret)) {
+        if (OB_FAIL(iter->get_next_token(word, word_len, char_cnt, word_freq))) {
+          if (OB_ITER_END != ret) {
+          }
+        } else if (OB_FAIL(add_word.process_word(word, word_len, char_cnt, word_freq))) {
+        }
+      }
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+
+    if (!is_reused && cached_iter_ == nullptr && OB_NOT_NULL(iter)) {
+      parser_desc_->free_token_iter(&param, iter);
+      iter = nullptr;
+    }
+
+    if (OB_SUCC(ret)) {
       doc_length = add_word.get_add_word_count();
     }
   }

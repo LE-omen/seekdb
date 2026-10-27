@@ -25,6 +25,9 @@
 #include "data_plane/fts/ob_fts_parser.h"
 
 #include <cstdint>
+#include "lib/container/ob_se_array.h"
+#include "lib/allocator/page_arena.h"
+
 namespace oceanbase
 {
 namespace storage
@@ -36,11 +39,12 @@ class ObIKFTParser final : public ObITokenIterator
 public:
   ObIKFTParser(ObIAllocator &allocator, ObFTDictHub *hub)
       : allocator_(allocator),
+        doc_allocator_(lib::ObMemAttr("IKDocAlloc")),
         is_inited_(false),
         coll_type_(ObCollationType::CS_TYPE_INVALID),
         ctx_(nullptr),
         hub_(hub),
-        segmenters_(allocator_),
+        segmenters_(),
         cache_main_(allocator),
         cache_quan_(allocator),
         cache_stop_(allocator),
@@ -53,6 +57,7 @@ public:
   virtual ~ObIKFTParser() { reset(); }
 
   int init(const ObFTParserParam &param);
+  int reuse(const ObFTParserParam &param);
 
   int get_next_token(const char *&word,
                      int64_t &word_len,
@@ -91,12 +96,13 @@ private:
 private:
   static constexpr int SEGMENT_LIMIT = 1000;
   ObIAllocator &allocator_;
+  ObArenaAllocator doc_allocator_;
   bool is_inited_;
 
   ObCollationType coll_type_;
   TokenizeContext *ctx_;
   ObFTDictHub *hub_;
-  ObList<ObIIKProcessor *, ObIAllocator> segmenters_;
+  ObSEArray<ObIIKProcessor *, 4> segmenters_;
 
   // For now there's no change of dict in one query, so we can pin dict this level.
   ObFTCacheRangeContainer cache_main_;
@@ -116,6 +122,7 @@ public:
   ObIKFTParserDesc() {}
   virtual ~ObIKFTParserDesc() = default;
   virtual int segment(ObFTParserParam *param, ObITokenIterator *&iter) const override;
+  virtual int reuse_token_iter(ObFTParserParam *param, ObITokenIterator *&iter) const override;
   virtual void free_token_iter(ObFTParserParam *param, ObITokenIterator *&iter) const override;
   virtual int get_add_word_flag(ObAddWordFlag &flag) const override;
 };

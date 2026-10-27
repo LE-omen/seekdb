@@ -223,6 +223,7 @@ private:
   ObFTParser parser_name_;
   ObAddWordFlag add_word_flag_;
   ObFTParserProperty parser_property_;
+  mutable ObITokenIterator *cached_iter_;
   bool is_inited_;
 
 private:

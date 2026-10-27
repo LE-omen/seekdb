@@ -68,6 +68,23 @@ int TokenizeContext::init()
   return ret;
 }
 
+int TokenizeContext::reuse(const char *fulltext, int64_t fulltext_len)
+{
+  int ret = OB_SUCCESS;
+  fulltext_ = fulltext;
+  fulltext_len_ = fulltext_len;
+  cursor_ = 0;
+  next_char_len_ = 0;
+  handle_size_ = 0;
+  result_list_.reset();
+  token_list_.reset();
+  if (OB_ISNULL(fulltext_) || fulltext_len_ <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(prepare_next_char())) {
+  }
+  return ret;
+}
+
 int TokenizeContext::reset_resource()
 {
   handle_size_ = 0;

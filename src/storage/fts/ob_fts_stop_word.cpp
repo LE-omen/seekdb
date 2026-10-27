@@ -71,19 +71,103 @@ void ObStopWordChecker::destroy()
   }
 }
 
+OB_INLINE static bool is_fast_builtin_stopword(const char *str, int64_t len)
+{
+  if (len <= 0 || len > 5 || str == nullptr) {
+    return false;
+  }
+  for (int64_t i = 0; i < len; ++i) {
+    if (str[i] < 'a' || str[i] > 'z') {
+      return false;
+    }
+  }
+  switch (len) {
+    case 1:
+      return (str[0] == 'a' || str[0] == 'i');
+    case 2:
+      switch (str[0]) {
+        case 'a': return str[1] == 'n' || str[1] == 's' || str[1] == 't';
+        case 'b': return str[1] == 'e' || str[1] == 'y';
+        case 'd': return str[1] == 'e';
+        case 'e': return str[1] == 'n';
+        case 'i': return str[1] == 'n' || str[1] == 's' || str[1] == 't';
+        case 'l': return str[1] == 'a';
+        case 'o': return str[1] == 'f' || str[1] == 'n' || str[1] == 'r';
+        case 't': return str[1] == 'o';
+        default: return false;
+      }
+    case 3:
+      switch (str[0]) {
+        case 'a': return str[1] == 'r' && str[2] == 'e';
+        case 'c': return str[1] == 'o' && str[2] == 'm';
+        case 'f': return str[1] == 'o' && str[2] == 'r';
+        case 'h': return str[1] == 'o' && str[2] == 'w';
+        case 't': return str[1] == 'h' && str[2] == 'e';
+        case 'u': return str[1] == 'n' && str[2] == 'd';
+        case 'w':
+          return (str[1] == 'a' && str[2] == 's') ||
+                 (str[1] == 'h' && str[2] == 'o') ||
+                 (str[1] == 'w' && str[2] == 'w');
+        default: return false;
+      }
+    case 4:
+      switch (str[0]) {
+        case 'f': return str[1] == 'r' && str[2] == 'o' && str[3] == 'm';
+        case 't':
+          return (str[1] == 'h' && str[2] == 'a' && str[3] == 't') ||
+                 (str[1] == 'h' && str[2] == 'i' && str[3] == 's');
+        case 'w':
+          return (str[1] == 'h' && str[2] == 'a' && str[3] == 't') ||
+                 (str[1] == 'h' && str[2] == 'e' && str[3] == 'n') ||
+                 (str[1] == 'i' && str[2] == 'l' && str[3] == 'l') ||
+                 (str[1] == 'i' && str[2] == 't' && str[3] == 'h');
+        default: return false;
+      }
+    case 5:
+      if (str[0] == 'a') {
+        return str[1] == 'b' && str[2] == 'o' && str[3] == 'u' && str[4] == 't';
+      } else if (str[0] == 'w') {
+        return str[1] == 'h' && str[2] == 'e' && str[3] == 'r' && str[4] == 'e';
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
+    const common::ObString &word_str = word.get_word().get_string();
+    const int32_t len = word_str.length();
+    const char *ptr = word_str.ptr();
+    if (is_fast_builtin_stopword(ptr, len)) {
+      is_stopword = true;
+      return OB_SUCCESS;
+    }
+    if (len > 5 || len == 0) {
+      is_stopword = false;
+      return OB_SUCCESS;
+    }
+    bool has_non_ascii = false;
+    for (int32_t i = 0; i < len; ++i) {
+      if (static_cast<uint8_t>(ptr[i]) >= 0x80) {
+        has_non_ascii = true;
+        break;
+      }
+    }
+    if (has_non_ascii) {
+      is_stopword = false;
+      return OB_SUCCESS;
+    }
+
+    common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
     common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
     if (OB_FAIL(common::ObCharset::charset_convert(
                                        allocator,
                                        word.get_word().get_string(),
@@ -101,7 +185,6 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
         ret = OB_SUCCESS;
       } else if (OB_SUCC(ret)) {
         ret = OB_ERR_UNEXPECTED;
-      } else {
       }
     }
   }
@@ -164,15 +247,29 @@ int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
+    const common::ObString &src_str = src.get_word().get_string();
+    const char *ptr = src_str.ptr();
+    const int32_t len = src_str.length();
+    bool has_upper = false;
+    for (int32_t i = 0; i < len; ++i) {
+      if (ptr[i] >= 'A' && ptr[i] <= 'Z') {
+        has_upper = true;
+        break;
+      }
+    }
+    if (!has_upper) {
+      dst = src;
     } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
+      ObString dst_str;
+      if (OB_FAIL(ObCharset::tolower(
+                      word_meta_.get_collation_type(),
+                      src_str,
+                      dst_str,
+                      allocator_))) {
+      } else {
+        ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
+        dst = tmp;
+      }
     }
   } else {
     dst = src;

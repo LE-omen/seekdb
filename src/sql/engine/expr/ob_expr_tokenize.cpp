@@ -82,16 +82,19 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
 {
   int ret = OB_SUCCESS;
   storage::ObFTParseHelper tokenize_helper;
-  const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
   int64_t doc_len = 0;
-  storage::ObFTWordMap token_map;
-
-  ObArenaAllocator tmp_parse_alloc(ObMemAttr("Tmp buffer"));
+  static thread_local storage::ObFTWordMap tl_token_map;
+  if (OB_UNLIKELY(!tl_token_map.created())) {
+    if (OB_FAIL(tl_token_map.create(997, common::ObMemAttr("FTWordMap")))) {
+      return ret;
+    }
+  } else {
+    tl_token_map.reuse();
+  }
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(tokenize_helper.init(&allocator, param.parser_name_, param.properties_))) {
-  } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
   } else if (
       (0 != param.fulltext_.length())
       && OB_FAIL(tokenize_helper.segment(
@@ -99,18 +102,18 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
                      param.fulltext_.ptr(),
                      param.fulltext_.length(),
                      doc_len,
-                     token_map))) {
+                     tl_token_map))) {
   } else {
     switch (param.output_mode_) {
     case TokenizeParam::OUTPUT_MODE::DEFAULT: {
-      if (OB_FAIL(tokenize_helper.make_token_array_json(token_map, result))) {
+      if (OB_FAIL(tokenize_helper.make_token_array_json(tl_token_map, result))) {
       } else {
         // pass
       }
       break;
     }
     case TokenizeParam::OUTPUT_MODE::ALL: {
-      if (OB_FAIL(tokenize_helper.make_detail_json(token_map, doc_len, result))) {
+      if (OB_FAIL(tokenize_helper.make_detail_json(tl_token_map, doc_len, result))) {
       } else {
         // pass
       }

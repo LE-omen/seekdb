@@ -36,10 +36,12 @@ public:
   }
   ~ObIKQuantifierProcessor() override { count_hits_.reset(); }
 
+  void reset() override;
+
   int do_process(TokenizeContext &ctx,
                  const char *ch,
                  const uint8_t char_len,
-                 const ObFTCharUtil::CharType type);
+                 const ObFTCharUtil::CharType type) override;
 
 private:
   int process_CN_number(TokenizeContext &ctx,
@@ -51,7 +53,6 @@ private:
                        const char *ch,
                        const uint8_t char_len,
                        const ObFTCharUtil::CharType type);
-  void reset();
 
 private:
   bool need_count_scan(TokenizeContext &ctx);

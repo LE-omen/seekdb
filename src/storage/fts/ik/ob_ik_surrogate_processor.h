@@ -30,18 +30,18 @@ public:
   ObIKSurrogateProcessor() {}
   ~ObIKSurrogateProcessor() override {}
 
+  void reset() override
+  {
+    low_offset_ = -1;
+    high_offset_ = -1;
+  }
+
   int do_process(TokenizeContext &ctx,
                  const char *ch,
                  const uint8_t char_len,
                  const ObFTCharUtil::CharType type) override;
 
 private:
-  void reset()
-  {
-    low_offset_ = -1;
-    high_offset_ = -1;
-  }
-
   bool has_high() { return high_offset_ != -1; }
 
 private:

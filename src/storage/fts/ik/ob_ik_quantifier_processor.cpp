@@ -193,6 +193,7 @@ int ObIKQuantifierProcessor::output_num_token(TokenizeContext &ctx)
 
 void ObIKQuantifierProcessor::reset()
 {
+  count_hits_.reset();
   start_ = -1;
   end_ = -1;
   quan_char_cnt_ = 0;
