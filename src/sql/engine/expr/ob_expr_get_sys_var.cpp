@@ -50,6 +50,12 @@ int ObExprGetSysVar::calc_result_type2(ObExprResType &type,
     LOG_ERROR("session is NULL");
   } else {
     ObString var_name = type1.get_param().get_varchar();
+    if (0 == var_name.case_compare("enable_file_sql")) {
+      type.set_type(ObIntType);
+      type.set_scale(DEFAULT_SCALE_FOR_INTEGER);
+      type.set_precision(DEFAULT_PRECISION_FOR_BOOL);
+      return OB_SUCCESS;
+    }
     bool is_exist = false;
     ObObjType data_type = ObMaxType;
     if (OB_FAIL(session->sys_variable_exists(var_name, is_exist))) {
@@ -168,7 +174,9 @@ int ObExprGetSysVar::get_session_var(ObObj &result,
     ret = OB_ERR_SYS_VARIABLE_UNKNOWN;
     LOG_USER_ERROR(OB_ERR_SYS_VARIABLE_UNKNOWN, var_name.length(), var_name.ptr());
   } else {
-    if (0 == (var_name.compare(OB_SV_TIMESTAMP))) {
+    if (0 == var_name.case_compare("enable_file_sql")) {
+      result.set_int(session->is_file_sql_enabled() ? 1 : 0);
+    } else if (0 == (var_name.compare(OB_SV_TIMESTAMP))) {
       if (OB_ISNULL(exec_ctx->get_physical_plan_ctx())) {
         ret = OB_ERR_UNEXPECTED;
       } else {

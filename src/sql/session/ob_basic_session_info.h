@@ -447,6 +447,9 @@ public:
   int get_ob_ivf_nprobes(uint64_t &ob_ivf_nprobes) const;
   int get_ob_sparse_drop_ratio_search(uint64_t &ob_sparse_drop_ratio_search) const;
   int get_sql_quote_show_create(bool &sql_quote_show_create) const;
+  int get_ai_column_strict_read(bool &strict_read) const;
+  bool is_file_sql_enabled() const { return enable_file_sql_; }
+  void set_enable_file_sql(bool v) { enable_file_sql_ = v; }
   common::ObConsistencyLevel get_consistency_level() const { return consistency_level_; };
   bool is_zombie() const { return SESSION_KILLED == get_session_state();}
   bool is_query_killed() const;
@@ -1850,6 +1853,7 @@ private:
   uint64_t sys_var_config_hash_val_;
   char thread_name_[OB_THREAD_NAME_BUF_LEN];
   bool is_real_inner_session_; 
+  bool enable_file_sql_;
   // Currently, when inner sql is executed, the session will be created from session_mgr in most cases. We think he is an inner session;
   // In addition, in situations such as PL execution, the external session will be passed to the inner sql Connection. In this case, it is not considered an inner session.
   // There are differences between the two in terms of ASH statistics and so on, so they should be distinguished.

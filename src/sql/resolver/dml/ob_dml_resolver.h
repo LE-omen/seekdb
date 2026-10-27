@@ -32,6 +32,7 @@ class ObChildStmtResolver;
 class ObDelUpdStmt;
 class ObSelectResolver;
 class ObInsertResolver;
+struct FileColumnMeta;
 
 static char *str_to_lower(char *pszBuf, int64_t length);
 /*
@@ -671,6 +672,9 @@ protected:
   int gen_values_table_column_items(const int64_t column_cnt,
                                     const ObIArray<ObRawExprResType> &res_types,
                                     TableItem &table_item);
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
+  int gen_file_table_column_items(const common::ObIArray<FileColumnMeta> &columns,
+                                  TableItem &table_item);
   int resolve_match_against_expr(ObMatchFunRawExpr &expr);
   int resolve_es_match_expr(ObMatchFunRawExpr &expr);
 private:

@@ -146,7 +146,8 @@ ObBasicSessionInfo::ObBasicSessionInfo()
       last_update_tz_time_(0),
       last_refresh_schema_version_(OB_INVALID_VERSION),
       sys_var_config_hash_val_(0),
-      is_real_inner_session_(false)
+      is_real_inner_session_(false),
+      enable_file_sql_(false)
 {
   thread_data_.reset();
   MEMSET(sys_vars_, 0, sizeof(sys_vars_));
@@ -402,6 +403,7 @@ void ObBasicSessionInfo::reset(bool skip_sys_var)
   next_tx_read_only_ = -1;
   next_tx_isolation_ = transaction::ObTxIsolationLevel::INVALID;
   enable_mysql_compatible_dates_ = false;
+  enable_file_sql_ = false;
   is_diagnosis_enabled_ = false;
   diagnosis_limit_num_ = 0;
   log_id_level_map_valid_ = false;
@@ -1489,6 +1491,18 @@ void ObBasicSessionInfo::mark_sys_var_str_dirty()
 int ObBasicSessionInfo::update_sys_variable_by_name(const ObString &var, const ObObj &val)
 {
   int ret = OB_SUCCESS;
+  if (0 == var.case_compare("enable_file_sql")) {
+    bool enabled = false;
+    if (val.is_int()) {
+      enabled = (val.get_int() != 0);
+    } else if (val.is_bool()) {
+      enabled = val.get_bool();
+    } else if (val.is_string_type()) {
+      enabled = (val.get_string() == "1" || val.get_string().case_compare("ON") == 0 || val.get_string().case_compare("TRUE") == 0);
+    }
+    set_enable_file_sql(enabled);
+    return OB_SUCCESS;
+  }
   ObSysVarClassType var_id = SYS_VAR_INVALID;
   if (var.empty()) {
     ret = OB_INVALID_ARGUMENT;
@@ -1771,6 +1785,10 @@ int ObBasicSessionInfo::get_sys_variable_by_name(const ObString &var, ObBasicSys
 int ObBasicSessionInfo::get_sys_variable_by_name(const ObString &var, ObObj &val) const
 {
   int ret = OB_SUCCESS;
+  if (0 == var.case_compare("enable_file_sql")) {
+    val.set_int(is_file_sql_enabled() ? 1 : 0);
+    return OB_SUCCESS;
+  }
   ObBasicSysVar *sys_var = NULL;
   if (OB_UNLIKELY(var.empty())) {
     ret = OB_INVALID_ARGUMENT;
@@ -1864,6 +1882,10 @@ int ObBasicSessionInfo::get_sys_variable(const ObSysVarClassType sys_var_id, boo
 int ObBasicSessionInfo::sys_variable_exists(const ObString &var, bool &is_exists) const
 {
   int ret = OB_SUCCESS;
+  if (0 == var.case_compare("enable_file_sql")) {
+    is_exists = true;
+    return OB_SUCCESS;
+  }
   ObSysVarClassType sys_var_id = SYS_VAR_INVALID;
   if (SYS_VAR_INVALID == (sys_var_id = share::ObSysVarMeta::find_sys_var_id_by_name(var))) {
   } else if (OB_FAIL(sys_variable_exists(sys_var_id, is_exists))) {
@@ -3016,6 +3038,11 @@ int ObBasicSessionInfo::get_ob_ivf_nprobes(uint64_t &ob_ivf_nprobes) const
 int ObBasicSessionInfo::get_sql_quote_show_create(bool &sql_quote_show_create) const
 {
   return get_bool_sys_var(SYS_VAR_SQL_QUOTE_SHOW_CREATE, sql_quote_show_create);
+}
+
+int ObBasicSessionInfo::get_ai_column_strict_read(bool &strict_read) const
+{
+  return get_bool_sys_var(SYS_VAR_AI_COLUMN_STRICT_READ, strict_read);
 }
 
 int ObBasicSessionInfo::get_optimizer_cost_based_transformation(int64_t &cbqt_policy) const

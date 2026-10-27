@@ -154,6 +154,18 @@ int ObVariableSetExecutor::execute(ObExecContext &ctx, ObVariableSetStmt &stmt)
             } else if (OB_FAIL(set_user_variable(value_obj, node.variable_name_, expr_ctx))) {
             }
           } else {
+            if (0 == node.variable_name_.case_compare("enable_file_sql")) {
+              bool enabled = false;
+              if (value_obj.is_int()) {
+                enabled = (value_obj.get_int() != 0);
+              } else if (value_obj.is_bool()) {
+                enabled = value_obj.get_bool();
+              } else if (value_obj.is_string_type()) {
+                enabled = (value_obj.get_string() == "1" || value_obj.get_string().case_compare("ON") == 0 || value_obj.get_string().case_compare("TRUE") == 0);
+              }
+              session->set_enable_file_sql(enabled);
+              continue;
+            }
             ObSetVar set_var(node.variable_name_, node.set_scope_, node.is_set_default_,
                              *expr_ctx.calc_buf_, *sql_proxy);
             ObObj out_obj;

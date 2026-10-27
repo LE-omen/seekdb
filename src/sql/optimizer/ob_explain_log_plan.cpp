@@ -18,6 +18,7 @@
 #include "sql/optimizer/ob_explain_log_plan.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -63,32 +64,97 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       child_plan->get_optimizer_context().set_batch_size(batch_size);
       values_op = static_cast<ObLogValues*>(top);
       values_op->set_explain_plan(child_plan);
-      ObSqlPlan sql_plan(get_allocator());
-      sql_plan.set_session_info(get_optimizer_context().get_session_info());
-      ObExplainLogPlan *explain_plan = static_cast<ObExplainLogPlan*>(child_plan);
-      ObSEArray<common::ObString, 64> plan_strs;
-      const ObString& into_table = explain_stmt->get_into_table();
-      const ObString& statement_id = explain_stmt->get_statement_id();
-      if (OB_FAIL(sql_plan.store_sql_plan_for_explain(get_optimizer_context().get_exec_ctx(),
-                                                      child_plan,
-                                                      explain_stmt->get_explain_type(),
-                                                      0 == into_table.length() ? "PLAN_TABLE" : into_table,
-                                                      0 == statement_id.length() ? "" : statement_id,
-                                                      explain_stmt->get_display_opt(),
-                                                      plan_strs))) {
-      } else {
-        //For explain stmt, we can do pack at the stage of expr alloc,
-        //But we need to use the FALSE flag to tell the driver 
-        //to use normal encoding instead of memcopy
+      if (explain_stmt->is_describe()) {
         optimizer_context_.set_packed(false);
-      }
-      for (int64_t i = 0; OB_SUCC(ret) && i < plan_strs.count(); ++i) {
-        ObObj obj;
-        obj.set_varchar(plan_strs.at(i));
-        ObNewRow row;
-        row.cells_ = &obj;
-        row.count_ = 1;
-        if (OB_FAIL(values_op->add_row(row))) {
+        if (child_stmt->is_select_stmt()) {
+          const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt*>(child_stmt);
+          const TableItem *table_item = (select_stmt->get_table_items().count() > 0) ?
+              select_stmt->get_table_item(0) : NULL;
+          const ObValuesTableDef *vdef = (table_item != NULL && table_item->is_values_table()) ?
+              table_item->values_table_def_ : NULL;
+          for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+            const SelectItem &s_item = select_stmt->get_select_item(i);
+            ObString col_name = s_item.is_real_alias_ ? s_item.alias_name_ : s_item.expr_name_;
+            if (col_name.empty() && s_item.expr_ != NULL) {
+              if (s_item.expr_->is_column_ref_expr()) {
+                col_name = static_cast<const ObColumnRefRawExpr*>(s_item.expr_)->get_column_name();
+              }
+            }
+            ObObjType type = s_item.expr_ != NULL ? s_item.expr_->get_result_type().get_type() : ObVarcharType;
+            const char *type_str = "VARCHAR";
+            if (ob_is_bool_type(type) || (s_item.expr_ != NULL && s_item.expr_->get_result_type().is_boolean())) {
+              type_str = "BOOLEAN";
+            } else if (ob_is_integer_type(type)) {
+              type_str = "BIGINT";
+            } else if (ob_is_double_type(type) || ob_is_float_type(type)) {
+              type_str = "DOUBLE";
+            } else if (ob_is_date_type(type)) {
+              type_str = "DATE";
+            } else if (ob_is_datetime_or_timestamp_type(type)) {
+              type_str = "DATETIME";
+            } else {
+              type_str = "VARCHAR";
+            }
+
+            bool is_null = false;
+            if (vdef != NULL && i < vdef->column_nnvs_.count()) {
+              is_null = (vdef->column_nnvs_.at(i) > 0);
+            }
+            ObObj *cells = static_cast<ObObj*>(get_allocator().alloc(sizeof(ObObj) * 6));
+            if (OB_ISNULL(cells)) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            } else {
+              new (&cells[0]) ObObj();
+              cells[0].set_varchar(col_name);
+              cells[0].set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+              new (&cells[1]) ObObj();
+              cells[1].set_varchar(type_str);
+              cells[1].set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+              new (&cells[2]) ObObj();
+              cells[2].set_varchar(is_null ? "YES" : "NO");
+              cells[2].set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+              new (&cells[3]) ObObj();
+              cells[3].set_null();
+              new (&cells[4]) ObObj();
+              cells[4].set_null();
+              new (&cells[5]) ObObj();
+              cells[5].set_null();
+              ObNewRow row;
+              row.cells_ = cells;
+              row.count_ = 6;
+              if (OB_FAIL(values_op->add_row(row))) {
+              }
+            }
+          }
+        }
+      } else {
+        ObSqlPlan sql_plan(get_allocator());
+        sql_plan.set_session_info(get_optimizer_context().get_session_info());
+        ObExplainLogPlan *explain_plan = static_cast<ObExplainLogPlan*>(child_plan);
+        ObSEArray<common::ObString, 64> plan_strs;
+        const ObString& into_table = explain_stmt->get_into_table();
+        const ObString& statement_id = explain_stmt->get_statement_id();
+        if (OB_FAIL(sql_plan.store_sql_plan_for_explain(get_optimizer_context().get_exec_ctx(),
+                                                        child_plan,
+                                                        explain_stmt->get_explain_type(),
+                                                        0 == into_table.length() ? "PLAN_TABLE" : into_table,
+                                                        0 == statement_id.length() ? "" : statement_id,
+                                                        explain_stmt->get_display_opt(),
+                                                        plan_strs))) {
+        } else {
+          //For explain stmt, we can do pack at the stage of expr alloc,
+          //But we need to use the FALSE flag to tell the driver 
+          //to use normal encoding instead of memcopy
+          optimizer_context_.set_packed(false);
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < plan_strs.count(); ++i) {
+          ObObj obj;
+          obj.set_varchar(plan_strs.at(i));
+          ObNewRow row;
+          row.cells_ = &obj;
+          row.count_ = 1;
+          if (OB_FAIL(values_op->add_row(row))) {
+          }
         }
       }
       if (OB_SUCC(ret)) {

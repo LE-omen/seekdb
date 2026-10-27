@@ -30,7 +30,7 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
 {
   int ret = OB_SUCCESS;
   ObExplainStmt *explain_stmt = NULL;
-  if (!(T_EXPLAIN == parse_tree.type_  && 5 == parse_tree.num_child_)) {
+  if (!(T_EXPLAIN == parse_tree.type_  && parse_tree.num_child_ >= 5)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid EXPLAIN syntax",
              "type", parse_tree.type_,
@@ -140,6 +140,12 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
     if (OB_SUCC(ret) && NULL != statement_id_node) {
       ObString statement_id(statement_id_node->str_len_, statement_id_node->str_value_);
       explain_stmt->set_statement_id(statement_id);
+    }
+    if (OB_SUCC(ret) && parse_tree.num_child_ >= 6) {
+      ParseNode *desc_node = parse_tree.children_[5];
+      if (desc_node != NULL && desc_node->type_ == T_DESC) {
+        explain_stmt->set_is_describe(true);
+      }
     }
   }
 

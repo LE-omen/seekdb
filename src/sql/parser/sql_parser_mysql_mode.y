@@ -41,7 +41,6 @@
 #include "../../../src/sql/parser/sql_parser_base.h"
 
 #define GEN_EXPLAN_STMT(no_use, explain_stmt, explain_type, display_type, stmt, into_table, set_statement_id) \
-  (void)(no_use); \
   ParseNode *type_node = NULL; \
   ParseNode *display_node = NULL; \
   if (0 != explain_type) { \
@@ -50,8 +49,8 @@
   if (0 != display_type) { \
     malloc_terminal_node(display_node, result->malloc_pool_, display_type); \
   } \
-  malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
-                           type_node, display_node, into_table, set_statement_id, stmt);
+  malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 6, \
+                           type_node, display_node, into_table, set_statement_id, stmt, no_use);
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -289,7 +288,7 @@ END_P SET_VAR DELIMITER
         FOUND FORK FREEZE FREQUENCY FUNCTION FOLLOWING FLASHBACK FULL FRAGMENTATION FROZEN FILE_ID FILTER
         FIELD_OPTIONALLY_ENCLOSED_BY FIELD_DELIMITER FIELD_ENCLOSED_BY FILE_EXTENSION
 
-        GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
+        GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GLOB GRANTS GROUP_CONCAT GROUPING
         GLOBAL_ALIAS
 
         HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
@@ -333,10 +332,10 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
-        RANK READ_ONLY RECOVERY REJECT ROLE
+        RANK READ_ONLY RECOVERY REJECT ROLE READ_CSV READ_JSON READ_NDJSON READ_PARQUET
 
         SAMPLE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
         SEMISTRUCT_ENCODING_TYPE SERIAL SERIALIZABLE SESSION SESSION_USER SET_TP SHARE SHARED SHUTDOWN SIGNED
@@ -514,6 +513,9 @@ END_P SET_VAR DELIMITER
 %type <node> vector_similarity_expr vector_similarity_metric
 %type <node> algorithm_opt lock_opt
 %type <node> flush_privileges_stmt opt_flush_privileges_scope
+%type <node> opt_ai_column_with_options ai_column_option_list ai_column_option ai_column_option_val
+%type <node> file_table_expr file_func opt_file_table_args file_table_arg_list file_table_arg
+%type <node> copy_stmt copy_source opt_copy_options copy_option_list copy_option
 %start sql_stmt
 %%
 ////////////////////////////////////////////////////////////////
@@ -573,6 +575,7 @@ stmt:
   | fork_database_stmt      { $$ = $1; check_question_mark($$, result); }
   | diff_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | merge_table_stmt        { $$ = $1; check_question_mark($$, result); }
+  | copy_stmt               { $$ = $1; check_question_mark($$, result); }
   | create_database_stmt    { $$ = $1; check_question_mark($$, result); }
   | drop_database_stmt      { $$ = $1; check_question_mark($$, result); }
   | alter_database_stmt     { $$ = $1; check_question_mark($$, result); }
@@ -4848,6 +4851,16 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   dup_expr_string($7, result, @7.first_column, @7.last_column);
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, $10);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7, $1, $2, attributes, $7, $9, $12, $4);
+}
+| column_definition_ref data_type opt_collation AI COLUMN '(' expr ')' opt_ai_column_with_options opt_column_reference opt_position_column
+{
+  (void)($10);
+  ParseNode *attributes = NULL;
+  ParseNode *ai_type_node = NULL;
+  malloc_terminal_node(ai_type_node, result->malloc_pool_, T_AI_COLUMN);
+  set_data_type_collation($2, $3, true, false);
+  dup_expr_string($7, result, @7.first_column, @7.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 8, $1, $2, attributes, $7, ai_type_node, $11, NULL, $9);
 }
 | column_definition_ref SERIAL opt_column_attribute_list opt_position_column 
 {
@@ -10848,6 +10861,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 ;
 
 tbl_name:
@@ -12299,15 +12316,20 @@ explain_or_desc relation_factor opt_desc_column_option
 
 | explain_or_desc FORMAT COMP_EQ format_name explainable_stmt
 {
-  (void)($1);
-  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPLAIN, 5, $4, NULL, NULL, NULL, $5);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPLAIN, 6, $4, NULL, NULL, NULL, $5, $1);
 }
 ;
 
 explain_or_desc:
-EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+EXPLAIN { $$ = NULL; }
+| DESCRIBE
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_DESC);
+}
+| DESC
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_DESC);
+}
 ;
 
 explainable_stmt:
@@ -12645,6 +12667,12 @@ SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_conditi
   malloc_terminal_node($$, result->malloc_pool_, T_INT);
   $$->value_ = $2[0];
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $5, $6, $7);
+}
+| SHOW AI columns_or_fields from_or_in relation_factor opt_from_or_in_database_clause opt_show_condition
+{
+  (void)$3;
+  (void)$4;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_AI_COLUMNS, 3, $5, $6, $7);
 }
 | SHOW TABLE STATUS opt_from_or_in_database_clause opt_show_condition
 { malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_TABLE_STATUS, 2, $4, $5); }
@@ -14741,6 +14769,10 @@ DROP CONSTRAINT constraint_name
   (void)($3);
   $$ = NULL;
 }
+| RETRY AI COLUMN relation_name opt_where_clause
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_RETRY, 2, $4, $5);
+}
 ;
 
 algorithm_opt:
@@ -16806,6 +16838,57 @@ INTNUM
 
 /*===========================================================
  *
+ *	AI column options
+ *
+ *===========================================================*/
+
+opt_ai_column_with_options:
+  /* empty */
+  {
+    $$ = NULL;
+  }
+  | WITH '(' ai_column_option_list ')'
+  {
+    merge_nodes($$, result, T_AI_COLUMN_OPTIONS, $3);
+  }
+;
+
+ai_column_option_list:
+  ai_column_option
+  {
+    $$ = $1;
+  }
+  | ai_column_option_list ',' ai_column_option
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  }
+;
+
+ai_column_option:
+  relation_name COMP_EQ ai_column_option_val
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, $1, $3);
+  }
+;
+
+ai_column_option_val:
+  INTNUM
+  {
+    $1->type_ = T_NUMBER;
+    $$ = $1;
+  }
+  | string_literal
+  {
+    $$ = $1;
+  }
+  | relation_name
+  {
+    $$ = $1;
+  }
+;
+
+/*===========================================================
+ *
  *	json query
  *
  *===========================================================*/
@@ -17479,6 +17562,105 @@ literal
 }
 ;
 
+file_func:
+  READ_CSV { malloc_terminal_node($$, result->malloc_pool_, T_READ_CSV); }
+| READ_JSON { malloc_terminal_node($$, result->malloc_pool_, T_READ_JSON); }
+| READ_NDJSON { malloc_terminal_node($$, result->malloc_pool_, T_READ_NDJSON); }
+| READ_PARQUET { malloc_terminal_node($$, result->malloc_pool_, T_READ_PARQUET); }
+| GLOB { malloc_terminal_node($$, result->malloc_pool_, T_GLOB); }
+;
+
+file_table_expr:
+  file_func '(' expr opt_file_table_args ')'
+  {
+    ParseNode *alias_node = NULL;
+    make_name_node(alias_node, result->malloc_pool_, "");
+    malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $4, alias_node);
+  }
+| file_func '(' expr opt_file_table_args ')' relation_name
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $4, $6);
+  }
+| file_func '(' expr opt_file_table_args ')' AS relation_name
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 4, $1, $3, $4, $7);
+  }
+;
+
+opt_file_table_args:
+  /* empty */ { $$ = NULL; }
+| ',' file_table_arg_list { $$ = $2; }
+;
+
+file_table_arg_list:
+  file_table_arg
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, NULL);
+  }
+| file_table_arg ',' file_table_arg_list
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  }
+;
+
+file_table_arg:
+  relation_name COMP_EQ expr
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_NAMED_ARG, 2, $1, $3);
+  }
+;
+
+copy_stmt:
+  COPY copy_source TO literal opt_copy_options
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_TO_FILE, 3, $2, $4, $5);
+  }
+;
+
+copy_source:
+  '(' select_stmt ')'
+  {
+    dup_expr_string($2, result, @2.first_column, @2.last_column);
+    $$ = $2;
+  }
+| relation_factor { $$ = $1; }
+;
+
+opt_copy_options:
+  /* empty */ { $$ = NULL; }
+| '(' copy_option_list ')' { $$ = $2; }
+;
+
+copy_option_list:
+  copy_option
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, NULL);
+  }
+| copy_option ',' copy_option_list
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  }
+;
+
+copy_option:
+  relation_name
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 1, $1);
+  }
+| relation_name relation_name
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $2);
+  }
+| relation_name literal
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $2);
+  }
+| relation_name COMP_EQ expr
+  {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_OPTION, 2, $1, $3);
+  }
+;
+
 unreserved_keyword:
 unreserved_keyword_for_role_name { $$=$1;}
 | unreserved_keyword_ambiguous_roles { $$=$1;}
@@ -17710,6 +17892,7 @@ ACCOUNT
 |       GEOMCOLLECTION
 |       GEOMETRYCOLLECTION
 |       GET_FORMAT
+|       GLOB
 |       GLOBAL %prec LOWER_PARENS
 |       GRANTS
 |       GROUPING
@@ -17937,6 +18120,10 @@ ACCOUNT
 |       QUICK
 |       RANK
 |       READ_ONLY
+|       READ_CSV
+|       READ_JSON
+|       READ_NDJSON
+|       READ_PARQUET
 |       RECOVER
 |       RECOVERY
 |       RECURSIVE
@@ -17959,6 +18146,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

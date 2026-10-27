@@ -10341,24 +10341,29 @@ int ObLogPlan::allocate_output_expr_for_values_op(ObLogicalOperator &values_op)
   if (OB_ISNULL(optimizer_context_.get_session_info())) {
     ret = OB_ERR_UNEXPECTED;
   } else {
-    // Static typing engine need expr to output rows. We generate a const output expr
+    // Static typing engine need expr to output rows. We generate const output exprs
     // for values_op operator.
-    ObConstRawExpr *output = NULL;
-    if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
-    } else {
-      ObObj v;
-      v.set_varchar(" ");
-      v.set_collation_type(ObCharset::get_system_collation());
-      output->set_value(v);
-      if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
-      } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+    const ObExplainStmt *explain_stmt = (get_stmt() != NULL && get_stmt()->is_explain_stmt()) ?
+        static_cast<const ObExplainStmt*>(get_stmt()) : NULL;
+    int64_t expr_cnt = (explain_stmt != NULL && explain_stmt->is_describe()) ? 6 : 1;
+    for (int64_t i = 0; OB_SUCC(ret) && i < expr_cnt; ++i) {
+      ObConstRawExpr *output = NULL;
+      if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
       } else {
-        values_op.set_branch_id(0);
-        values_op.set_id(0);
-        values_op.set_op_id(0);
-        if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
-        } else { /*do nothing*/ }
+        ObObj v;
+        v.set_varchar(" ");
+        v.set_collation_type(ObCharset::get_system_collation());
+        output->set_value(v);
+        if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
+        } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+        } else if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
+        }
       }
+    }
+    if (OB_SUCC(ret)) {
+      values_op.set_branch_id(0);
+      values_op.set_id(0);
+      values_op.set_op_id(0);
     }
   }
   return ret;
