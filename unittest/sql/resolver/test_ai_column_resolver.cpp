@@ -212,6 +212,60 @@ TEST_F(TestAiColumnResolver, StatusPseudoColumnResolution)
   ASSERT_EQ(AI_STATE_MAX, str_to_ai_column_state(ObString::make_string("OTHER")));
 }
 
+static bool is_test_ident_char(char c)
+{
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool test_contains_column_ident(const common::ObString &expr, const common::ObString &col_name)
+{
+  if (col_name.empty() || expr.empty() || expr.length() < col_name.length()) {
+    return false;
+  }
+  const char *haystack = expr.ptr();
+  int32_t hlen = expr.length();
+  const char *needle = col_name.ptr();
+  int32_t nlen = col_name.length();
+  for (int32_t i = 0; i <= hlen - nlen; ++i) {
+    if (0 == strncasecmp(haystack + i, needle, nlen)) {
+      bool prev_ok = (i == 0 || !is_test_ident_char(haystack[i - 1]));
+      bool next_ok = (i + nlen >= hlen || !is_test_ident_char(haystack[i + nlen]));
+      if (prev_ok && next_ok) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+TEST_F(TestAiColumnResolver, TokenBoundaryMatching)
+{
+  ObString col_t = ObString::make_string("t");
+  ASSERT_FALSE(test_contains_column_ident(ObString::make_string("text_model"), col_t));
+  ASSERT_FALSE(test_contains_column_ident(ObString::make_string("start_time"), col_t));
+  ASSERT_FALSE(test_contains_column_ident(ObString::make_string("state_col"), col_t));
+  ASSERT_TRUE(test_contains_column_ident(ObString::make_string("t"), col_t));
+  ASSERT_TRUE(test_contains_column_ident(ObString::make_string("concat(t, 'x')"), col_t));
+  ASSERT_TRUE(test_contains_column_ident(ObString::make_string("t + 1"), col_t));
+  ASSERT_TRUE(test_contains_column_ident(ObString::make_string("T"), col_t)); // Case insensitive
+}
+
+TEST_F(TestAiColumnResolver, RowkeyQuoteEscaping)
+{
+  ObString raw_pred = ObString::make_string("`code` = 'abc' and `id` = 1");
+  ObArenaAllocator alloc;
+  ObStringBuffer escaped(&alloc);
+  for (int64_t i = 0; i < raw_pred.length(); ++i) {
+    char c = raw_pred.ptr()[i];
+    if (c == '\'') {
+      escaped.append("''");
+    } else {
+      escaped.append(&c, 1);
+    }
+  }
+  ASSERT_EQ("`code` = ''abc'' and `id` = 1", ObString(escaped.length(), escaped.ptr()));
+}
+
 int main(int argc, char **argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

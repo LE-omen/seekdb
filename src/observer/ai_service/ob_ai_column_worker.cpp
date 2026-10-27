@@ -34,6 +34,18 @@ using namespace common::sqlclient;
 using namespace share;
 using namespace share::schema;
 
+static void escape_sql_str(const common::ObString &src, common::ObStringBuffer &dst)
+{
+  for (int64_t i = 0; i < src.length(); ++i) {
+    char c = src.ptr()[i];
+    if (c == '\'') {
+      dst.append("''");
+    } else {
+      dst.append(&c, 1);
+    }
+  }
+}
+
 ObAiColumnWorker::ObAiColumnWorker()
   : is_inited_(false),
     is_stopped_(false)
@@ -181,7 +193,7 @@ int ObAiColumnWorker::fetch_eligible_task_groups_(ObIAllocator &allocator,
           int64_t cid = 0;
           ObString pred_str;
 
-          EXTRACT_INT_FIELD_MYSQL(*result, "task_id", task.task_id_, int64_t);
+          EXTRACT_INT_FIELD_MYSQL_WITH_DEFAULT_VALUE(*result, "task_id", task.task_id_, int64_t, true, true, 0);
           EXTRACT_INT_FIELD_MYSQL(*result, "table_id", tid, int64_t);
           EXTRACT_INT_FIELD_MYSQL(*result, "column_id", cid, int64_t);
           EXTRACT_INT_FIELD_MYSQL(*result, "request_id", task.request_id_, int64_t);
@@ -644,6 +656,10 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
 {
   int ret = OB_SUCCESS;
 
+  // Escape single quotes for embedding in SQL string literals
+  ObStringBuffer escaped_pred(&allocator);
+  escape_sql_str(rowkey_pred, escaped_pred);
+
   // 1. Resolve table name and database name
   ObString db_name, tbl_name;
   if (OB_FAIL(get_table_name_(allocator, table_id, db_name, tbl_name))) {
@@ -658,7 +674,8 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
       "SELECT task_id, table_id, column_id, request_id, rowkey_predicate, retry_count, state "
       "FROM oceanbase.__all_ai_column_task "
       "WHERE table_id = %lu AND request_id = %ld AND rowkey_predicate = '%.*s'",
-      table_id, request_id, rowkey_pred.length(), rowkey_pred.ptr()))) {
+      table_id, request_id,
+      static_cast<int>(escaped_pred.length()), escaped_pred.ptr()))) {
   } else {
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
       ObMySQLResult *result = NULL;
@@ -669,7 +686,7 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
         while (OB_SUCC(ret) && OB_SUCC(result->next())) {
           AiColumnTaskInfo task;
           ObString pred_str;
-          EXTRACT_INT_FIELD_MYSQL(*result, "task_id", task.task_id_, int64_t);
+          EXTRACT_INT_FIELD_MYSQL_WITH_DEFAULT_VALUE(*result, "task_id", task.task_id_, int64_t, true, true, 0);
           EXTRACT_INT_FIELD_MYSQL(*result, "table_id", task.table_id_, uint64_t);
           EXTRACT_INT_FIELD_MYSQL(*result, "column_id", task.column_id_, uint64_t);
           EXTRACT_INT_FIELD_MYSQL(*result, "request_id", task.request_id_, int64_t);
@@ -737,7 +754,8 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
           ret = OB_SUCCESS;
           ObSqlString del_sql;
           del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_predicate = '%.*s'",
-                             table_id, rowkey_pred.length(), rowkey_pred.ptr());
+                             table_id,
+                             static_cast<int>(escaped_pred.length()), escaped_pred.ptr());
           int64_t affected = 0;
           GCTX.sql_proxy_->write(del_sql.ptr(), affected);
           return OB_SUCCESS;
@@ -757,7 +775,8 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
     LOG_INFO("discarding stale ai column tasks", K(request_id), K(current_row_req_id));
     ObSqlString del_sql;
     del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND request_id = %ld AND rowkey_predicate = '%.*s'",
-                       table_id, request_id, rowkey_pred.length(), rowkey_pred.ptr());
+                       table_id, request_id,
+                       static_cast<int>(escaped_pred.length()), escaped_pred.ptr());
     int64_t affected = 0;
     GCTX.sql_proxy_->write(del_sql.ptr(), affected);
     return OB_SUCCESS;
@@ -791,7 +810,7 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
       bool is_embed = (strstr(exec_res.meta_.raw_expr_.ptr(), "AI_EMBED") != NULL ||
                        strstr(exec_res.meta_.raw_expr_.ptr(), "ai_embed") != NULL);
 
-      // Extract model_name between quotes
+      // Extract model_name (quoted or unquoted identifier)
       ObString model_name;
       const char *raw_ptr = exec_res.meta_.raw_expr_.ptr();
       const char *open_paren = strchr(raw_ptr, '(');
@@ -802,6 +821,10 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
           char q = *p++;
           const char *m_start = p;
           while (*p && *p != q) p++;
+          model_name.assign_ptr(m_start, static_cast<int32_t>(p - m_start));
+        } else {
+          const char *m_start = p;
+          while (*p && *p != ',' && *p != ')' && !isspace(*p)) p++;
           model_name.assign_ptr(m_start, static_cast<int32_t>(p - m_start));
         }
       }
@@ -833,8 +856,15 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
                 LOG_WARN("fail to fetch evaluated prompt row", KR(ret));
               } else {
                 ObString val_str;
-                EXTRACT_VARCHAR_FIELD_MYSQL(*result, "__ai_prompt", val_str);
-                if (OB_SUCC(ret)) {
+                int get_ret = result->get_varchar("__ai_prompt", val_str);
+                if (OB_ERR_NULL_VALUE == get_ret) {
+                  exec_res.final_state_ = 4; // AI_STATE_FAILED
+                  exec_res.result_val_.reset();
+                  exec_results.push_back(exec_res);
+                  continue;
+                } else if (OB_FAIL(get_ret)) {
+                  LOG_WARN("fail to extract prompt value", KR(ret), KR(get_ret));
+                } else {
                   ob_write_string(allocator, val_str, evaluated_user_text);
                 }
               }
@@ -871,7 +901,7 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
                                         "eligible_ts = date_add(now(6), interval 100 millisecond) "
                                         "WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = '%.*s'",
                                         table_id, exec_res.task_.column_id_,
-                                        rowkey_pred.length(), rowkey_pred.ptr());
+                                        static_cast<int>(escaped_pred.length()), escaped_pred.ptr());
                 int64_t affected = 0;
                 GCTX.sql_proxy_->write(upd_task_sql.ptr(), affected);
               } else {
@@ -908,53 +938,65 @@ int ObAiColumnWorker::process_group_(ObIAllocator &allocator,
         }
       }
 
-      if (OB_SUCC(ret) && trans_check_req_id == request_id) {
-        // Construct writeback UPDATE statement for target row
-        ObSqlString update_sql;
-        update_sql.assign_fmt("UPDATE `%.*s`.`%.*s` SET ",
-                              db_name.length(), db_name.ptr(),
-                              tbl_name.length(), tbl_name.ptr());
-        for (int64_t i = 0; i < exec_results.count(); ++i) {
-          const TaskExecutionResult &r = exec_results.at(i);
-          if (i > 0) {
-            update_sql.append(", ");
-          }
-          if (r.final_state_ == 2) { // READY
-            // Escape single quotes in result
-            ObStringBuffer escaped_val(&allocator);
-            for (int64_t k = 0; k < r.result_val_.length(); ++k) {
-              char ch = r.result_val_.ptr()[k];
-              if (ch == '\'') escaped_val.append("''");
-              else escaped_val.append(&ch, 1);
+      if (OB_SUCC(ret)) {
+        if (trans_check_req_id == request_id) {
+          // Construct writeback UPDATE statement for target row
+          ObSqlString update_sql;
+          update_sql.assign_fmt("UPDATE `%.*s`.`%.*s` SET ",
+                                db_name.length(), db_name.ptr(),
+                                tbl_name.length(), tbl_name.ptr());
+          for (int64_t i = 0; i < exec_results.count(); ++i) {
+            const TaskExecutionResult &r = exec_results.at(i);
+            if (i > 0) {
+              update_sql.append(", ");
             }
-            update_sql.append_fmt("`%.*s` = '%.*s', `%.*s` = %ld",
-                                  r.result_col_name_.length(), r.result_col_name_.ptr(),
-                                  escaped_val.length(), escaped_val.ptr(),
-                                  r.state_col_name_.length(), r.state_col_name_.ptr(),
-                                  r.final_state_);
-          } else {
-            // FAILED (state = 4, result = NULL)
-            update_sql.append_fmt("`%.*s` = NULL, `%.*s` = %ld",
-                                  r.result_col_name_.length(), r.result_col_name_.ptr(),
-                                  r.state_col_name_.length(), r.state_col_name_.ptr(),
-                                  r.final_state_);
+            if (r.final_state_ == 2) { // READY
+              // Escape single quotes in result
+              ObStringBuffer escaped_val(&allocator);
+              escape_sql_str(r.result_val_, escaped_val);
+              update_sql.append_fmt("`%.*s` = '%.*s', `%.*s` = %ld",
+                                    r.result_col_name_.length(), r.result_col_name_.ptr(),
+                                    static_cast<int>(escaped_val.length()), escaped_val.ptr(),
+                                    r.state_col_name_.length(), r.state_col_name_.ptr(),
+                                    r.final_state_);
+            } else {
+              // FAILED (state = 4, result = NULL)
+              update_sql.append_fmt("`%.*s` = NULL, `%.*s` = %ld",
+                                    r.result_col_name_.length(), r.result_col_name_.ptr(),
+                                    r.state_col_name_.length(), r.state_col_name_.ptr(),
+                                    r.final_state_);
+            }
           }
-        }
-        update_sql.append_fmt(" WHERE %.*s", rowkey_pred.length(), rowkey_pred.ptr());
+          update_sql.append_fmt(" WHERE %.*s", rowkey_pred.length(), rowkey_pred.ptr());
 
-        int64_t affected_rows = 0;
-        if (OB_FAIL(trans.write(update_sql.ptr(), affected_rows))) {
-          LOG_WARN("fail to execute writeback update", KR(ret), K(update_sql));
-        }
+          int64_t affected_rows = 0;
+          if (OB_FAIL(trans.write(update_sql.ptr(), affected_rows))) {
+            LOG_WARN("fail to execute writeback update", KR(ret), K(update_sql));
+          }
 
-        // Delete group tasks from oceanbase.__all_ai_column_task
-        if (OB_SUCC(ret)) {
+          // Delete group tasks from oceanbase.__all_ai_column_task
+          if (OB_SUCC(ret)) {
+            ObSqlString del_task_sql;
+            del_task_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task "
+                                    "WHERE table_id = %lu AND request_id = %ld AND rowkey_predicate = '%.*s'",
+                                    table_id, request_id,
+                                    static_cast<int>(escaped_pred.length()), escaped_pred.ptr());
+            if (OB_FAIL(trans.write(del_task_sql.ptr(), affected_rows))) {
+              LOG_WARN("fail to delete completed ai tasks", KR(ret), K(del_task_sql));
+            }
+          }
+        } else {
+          // Row was deleted or updated with a newer request_id while worker was processing.
+          // Discard and delete stale tasks inside the transaction.
+          LOG_INFO("discarding stale ai column tasks in writeback trans", K(request_id), K(trans_check_req_id));
           ObSqlString del_task_sql;
           del_task_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task "
                                   "WHERE table_id = %lu AND request_id = %ld AND rowkey_predicate = '%.*s'",
-                                  table_id, request_id, rowkey_pred.length(), rowkey_pred.ptr());
+                                  table_id, request_id,
+                                  static_cast<int>(escaped_pred.length()), escaped_pred.ptr());
+          int64_t affected_rows = 0;
           if (OB_FAIL(trans.write(del_task_sql.ptr(), affected_rows))) {
-            LOG_WARN("fail to delete completed ai tasks", KR(ret), K(del_task_sql));
+            LOG_WARN("fail to delete stale ai tasks", KR(ret), K(del_task_sql));
           }
         }
       }

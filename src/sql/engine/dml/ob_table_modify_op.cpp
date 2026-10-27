@@ -1218,6 +1218,61 @@ int ObAiColumnDmlHandle::build_rowkey_predicate(
   return ret;
 }
 
+static void escape_sql_str(const common::ObString &src, common::ObStringBuffer &out)
+{
+  for (int64_t i = 0; i < src.length(); ++i) {
+    char c = src.ptr()[i];
+    if (c == '\'') {
+      out.append("''");
+    } else {
+      out.append(&c, 1);
+    }
+  }
+}
+
+static common::ObString get_table_db_name(ObTableModifyOp &op, const share::schema::ObTableSchema &table_schema)
+{
+  common::ObString db_name;
+  if (OB_NOT_NULL(op.get_exec_ctx().get_sql_ctx()) &&
+      OB_NOT_NULL(op.get_exec_ctx().get_sql_ctx()->schema_guard_)) {
+    const share::schema::ObDatabaseSchema *db_schema = nullptr;
+    if (OB_SUCCESS == op.get_exec_ctx().get_sql_ctx()->schema_guard_->get_database_schema(
+            table_schema.get_database_id(), db_schema) && OB_NOT_NULL(db_schema)) {
+      db_name = db_schema->get_database_name_str();
+    }
+  }
+  if (db_name.empty() && OB_NOT_NULL(op.get_exec_ctx().get_my_session())) {
+    db_name = op.get_exec_ctx().get_my_session()->get_database_name();
+  }
+  return db_name;
+}
+
+static bool is_ident_char(char c)
+{
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool contains_column_ident(const common::ObString &expr, const common::ObString &col_name)
+{
+  if (col_name.empty() || expr.empty() || expr.length() < col_name.length()) {
+    return false;
+  }
+  const char *haystack = expr.ptr();
+  int32_t hlen = expr.length();
+  const char *needle = col_name.ptr();
+  int32_t nlen = col_name.length();
+  for (int32_t i = 0; i <= hlen - nlen; ++i) {
+    if (0 == strncasecmp(haystack + i, needle, nlen)) {
+      bool prev_ok = (i == 0 || !is_ident_char(haystack[i - 1]));
+      bool next_ok = (i + nlen >= hlen || !is_ident_char(haystack[i + nlen]));
+      if (prev_ok && next_ok) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 int ObAiColumnDmlHandle::handle_insert(
     ObTableModifyOp &op,
     const ObTableSchema &table_schema,
@@ -1232,8 +1287,11 @@ int ObAiColumnDmlHandle::handle_insert(
   } else {
     int64_t req_id = ObTimeUtility::current_time();
     const uint64_t table_id = table_schema.get_table_id();
-    const ObString &db_name = table_schema.get_database_name();
-    const ObString &tbl_name = table_schema.get_table_name();
+    ObString db_name = get_table_db_name(op, table_schema);
+    const ObString &tbl_name = table_schema.get_table_name_str();
+
+    ObStringBuffer escaped_pred(&alloc);
+    escape_sql_str(rowkey_pred, escaped_pred);
 
     if (OB_FAIL(op.begin_nested_session(false))) {
     } else {
@@ -1245,10 +1303,10 @@ int ObAiColumnDmlHandle::handle_insert(
         ObSqlString task_sql;
         if (OB_FAIL(task_sql.assign_fmt(
             "INSERT INTO oceanbase.__all_ai_column_task "
-            "(table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
-            "VALUES (%lu, %lu, '%.*s', %ld, now(6), 0, 0)",
-            table_id, ai_col.get_column_id(),
-            rowkey_pred.length(), rowkey_pred.ptr(),
+            "(task_id, table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
+            "VALUES (%ld, %lu, %lu, '%.*s', %ld, now(6), 0, 0)",
+            req_id, table_id, ai_col.get_column_id(),
+            static_cast<int>(escaped_pred.length()), escaped_pred.ptr(),
             req_id))) {
         } else if (OB_FAIL(op.execute_write(task_sql.ptr()))) {
         } else if (OB_NOT_NULL(state_col) && OB_NOT_NULL(req_col)) {
@@ -1290,8 +1348,13 @@ int ObAiColumnDmlHandle::handle_update(
   } else {
     bool pk_changed = (old_pk_pred != new_pk_pred);
     const uint64_t table_id = table_schema.get_table_id();
-    const ObString &db_name = table_schema.get_database_name();
-    const ObString &tbl_name = table_schema.get_table_name();
+    ObString db_name = get_table_db_name(op, table_schema);
+    const ObString &tbl_name = table_schema.get_table_name_str();
+
+    ObStringBuffer escaped_old_pred(&alloc);
+    escape_sql_str(old_pk_pred, escaped_old_pred);
+    ObStringBuffer escaped_new_pred(&alloc);
+    escape_sql_str(new_pk_pred, escaped_new_pred);
 
     if (pk_changed) {
       int64_t req_id = ObTimeUtility::current_time();
@@ -1300,7 +1363,7 @@ int ObAiColumnDmlHandle::handle_update(
         ObSqlString del_task_sql;
         if (OB_FAIL(del_task_sql.assign_fmt(
             "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_predicate = '%.*s'",
-            table_id, old_pk_pred.length(), old_pk_pred.ptr()))) {
+            table_id, static_cast<int>(escaped_old_pred.length()), escaped_old_pred.ptr()))) {
         } else if (OB_FAIL(op.execute_write(del_task_sql.ptr()))) {
         } else {
           for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_ai_column_count(); ++i) {
@@ -1311,10 +1374,10 @@ int ObAiColumnDmlHandle::handle_update(
             ObSqlString ins_task_sql;
             if (OB_FAIL(ins_task_sql.assign_fmt(
                 "INSERT INTO oceanbase.__all_ai_column_task "
-                "(table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
-                "VALUES (%lu, %lu, '%.*s', %ld, now(6), 0, 0)",
-                table_id, ai_col.get_column_id(),
-                new_pk_pred.length(), new_pk_pred.ptr(),
+                "(task_id, table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
+                "VALUES (%ld, %lu, %lu, '%.*s', %ld, now(6), 0, 0)",
+                req_id, table_id, ai_col.get_column_id(),
+                static_cast<int>(escaped_new_pred.length()), escaped_new_pred.ptr(),
                 req_id))) {
             } else if (OB_FAIL(op.execute_write(ins_task_sql.ptr()))) {
             } else if (OB_NOT_NULL(state_col) && OB_NOT_NULL(req_col)) {
@@ -1350,7 +1413,7 @@ int ObAiColumnDmlHandle::handle_update(
           const ObColumnSchemaV2 *col_schema = table_schema.get_column_schema(cid);
           if (OB_NOT_NULL(col_schema)) {
             const ObString &col_name = col_schema->get_column_name_str();
-            if (expr_str.find(col_name) != nullptr) {
+            if (contains_column_ident(expr_str, col_name)) {
               if (j < dml_ctdef.old_row_.count() && j < dml_ctdef.new_row_.count()) {
                 ObDatum *old_datum = nullptr;
                 ObDatum *new_datum = nullptr;
@@ -1382,16 +1445,16 @@ int ObAiColumnDmlHandle::handle_update(
             ObSqlString del_task_sql;
             if (OB_FAIL(del_task_sql.assign_fmt(
                 "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = '%.*s'",
-                table_id, ai_col.get_column_id(), old_pk_pred.length(), old_pk_pred.ptr()))) {
+                table_id, ai_col.get_column_id(), static_cast<int>(escaped_old_pred.length()), escaped_old_pred.ptr()))) {
             } else if (OB_FAIL(op.execute_write(del_task_sql.ptr()))) {
             } else {
               ObSqlString ins_task_sql;
               if (OB_FAIL(ins_task_sql.assign_fmt(
                   "INSERT INTO oceanbase.__all_ai_column_task "
-                  "(table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
-                  "VALUES (%lu, %lu, '%.*s', %ld, now(6), 0, 0)",
-                  table_id, ai_col.get_column_id(),
-                  old_pk_pred.length(), old_pk_pred.ptr(),
+                  "(task_id, table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
+                  "VALUES (%ld, %lu, %lu, '%.*s', %ld, now(6), 0, 0)",
+                  req_id, table_id, ai_col.get_column_id(),
+                  static_cast<int>(escaped_old_pred.length()), escaped_old_pred.ptr(),
                   req_id))) {
               } else if (OB_FAIL(op.execute_write(ins_task_sql.ptr()))) {
               } else if (OB_NOT_NULL(state_col) && OB_NOT_NULL(req_col)) {
@@ -1433,12 +1496,14 @@ int ObAiColumnDmlHandle::handle_delete(
   if (OB_FAIL(build_rowkey_predicate(op, table_schema, dml_ctdef, dml_ctdef.old_row_, alloc, rowkey_pred))) {
   } else {
     const uint64_t table_id = table_schema.get_table_id();
+    ObStringBuffer escaped_pred(&alloc);
+    escape_sql_str(rowkey_pred, escaped_pred);
     if (OB_FAIL(op.begin_nested_session(false))) {
     } else {
       ObSqlString del_task_sql;
       if (OB_FAIL(del_task_sql.assign_fmt(
           "DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND rowkey_predicate = '%.*s'",
-          table_id, rowkey_pred.length(), rowkey_pred.ptr()))) {
+          table_id, static_cast<int>(escaped_pred.length()), escaped_pred.ptr()))) {
       } else if (OB_FAIL(op.execute_write(del_task_sql.ptr()))) {
       }
       int end_ret = op.end_nested_session();

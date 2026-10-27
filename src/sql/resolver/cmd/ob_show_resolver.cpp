@@ -1155,7 +1155,16 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               "WHERE d.database_name = '%.*s' AND t.table_name = '%.*s'",
               db_name.length(), db_name.ptr(),
               tbl_name.length(), tbl_name.ptr()))) {
-          } else if (OB_FAIL(ob_write_string(*params_.allocator_, show_sql.string(), select_sql))) {
+          } else {
+            if (parse_tree.children_[2] != NULL && parse_tree.children_[2]->type_ == T_LIKE_CLAUSE) {
+              ParseNode *like_node = parse_tree.children_[2];
+              if (like_node->children_[0] != NULL) {
+                ObString pat(like_node->children_[0]->str_len_, like_node->children_[0]->str_value_);
+                show_sql.append_fmt(" AND a.column_name LIKE '%.*s'", pat.length(), pat.ptr());
+              }
+            }
+            if (OB_FAIL(ob_write_string(*params_.allocator_, show_sql.string(), select_sql))) {
+            }
           }
         }
         break;

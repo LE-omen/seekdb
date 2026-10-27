@@ -3069,11 +3069,12 @@ int ObDMLResolver::resolve_table_column_expr(const ObQualifiedName &q_name, ObRa
   if (OB_SUCC(ret) && OB_NOT_NULL(session_info_) && session_info_->get_ai_column_strict_read()) {
     if (OB_NOT_NULL(real_ref_expr) && real_ref_expr->is_column_ref_expr()) {
       ObColumnRefRawExpr *col_expr = static_cast<ObColumnRefRawExpr *>(real_ref_expr);
-      uint64_t table_id = col_expr->get_table_id();
+      const TableItem *t_item = (table_item != NULL) ? table_item : get_stmt()->get_table_item_by_id(col_expr->get_table_id());
+      uint64_t real_table_id = (t_item != NULL && t_item->ref_id_ != OB_INVALID_ID) ? t_item->ref_id_ : col_expr->get_table_id();
       uint64_t column_id = col_expr->get_column_id();
       const ObTableSchema *table_schema = NULL;
       if (OB_NOT_NULL(schema_checker_) &&
-          OB_SUCC(schema_checker_->get_table_schema(table_id, table_schema)) &&
+          OB_SUCC(schema_checker_->get_table_schema(real_table_id, table_schema)) &&
           OB_NOT_NULL(table_schema) &&
           table_schema->is_ai_column(column_id)) {
         bool is_ready = true;
@@ -3082,7 +3083,7 @@ int ObDMLResolver::resolve_table_column_expr(const ObQualifiedName &q_name, ObRa
           ObSqlString task_sql;
           if (OB_SUCC(task_sql.assign_fmt(
               "SELECT count(*) FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu",
-              table_id, column_id))) {
+              real_table_id, column_id))) {
             SMART_VAR(ObMySQLProxy::MySQLResult, res) {
               ObMySQLResult *result = NULL;
               if (OB_SUCC(sql_proxy->read(res, task_sql.ptr()))) {
@@ -3102,11 +3103,26 @@ int ObDMLResolver::resolve_table_column_expr(const ObQualifiedName &q_name, ObRa
             if (OB_SUCC(table_schema->get_ai_column_schema(column_id, ai_col)) && OB_NOT_NULL(ai_col)) {
               const ObColumnSchemaV2 *state_col = table_schema->get_column_schema(ai_col->get_state_column_id());
               if (OB_NOT_NULL(state_col)) {
+                ObString db_name = col_expr->get_database_name();
+                if (db_name.empty() && OB_NOT_NULL(t_item)) {
+                  db_name = t_item->database_name_;
+                }
+                if (db_name.empty() && OB_NOT_NULL(schema_checker_) && OB_NOT_NULL(schema_checker_->get_schema_guard())) {
+                  const ObDatabaseSchema *db_schema = NULL;
+                  if (OB_SUCC(schema_checker_->get_schema_guard()->get_database_schema(
+                          table_schema->get_database_id(), db_schema)) && OB_NOT_NULL(db_schema)) {
+                    db_name = db_schema->get_database_name_str();
+                  }
+                }
+                if (db_name.empty() && OB_NOT_NULL(session_info_)) {
+                  db_name = session_info_->get_database_name();
+                }
+                const ObString &tbl_name = table_schema->get_table_name_str();
                 ObSqlString row_sql;
                 if (OB_SUCC(row_sql.assign_fmt(
                     "SELECT 1 FROM `%.*s`.`%.*s` WHERE `%.*s` != 2 LIMIT 1",
-                    table_schema->get_database_name().length(), table_schema->get_database_name().ptr(),
-                    table_schema->get_table_name().length(), table_schema->get_table_name().ptr(),
+                    db_name.length(), db_name.ptr(),
+                    tbl_name.length(), tbl_name.ptr(),
                     state_col->get_column_name_str().length(), state_col->get_column_name_str().ptr()))) {
                   SMART_VAR(ObMySQLProxy::MySQLResult, res) {
                     ObMySQLResult *result = NULL;
@@ -3123,7 +3139,7 @@ int ObDMLResolver::resolve_table_column_expr(const ObQualifiedName &q_name, ObRa
         }
         if (!is_ready) {
           ret = OB_AI_COLUMN_UNFINISHED_TASKS;
-          LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED_TASKS, table_id, column_id);
+          LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED_TASKS, real_table_id, column_id);
         }
       }
     }

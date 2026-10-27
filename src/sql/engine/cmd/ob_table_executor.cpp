@@ -752,6 +752,18 @@ int ObAlterTableExecutor::alter_table_exchange_partition_rpc(obcall::ObExchangeP
   return ret;
 }
 
+static void escape_sql_str(const common::ObString &src, common::ObStringBuffer &dst)
+{
+  for (int64_t i = 0; i < src.length(); ++i) {
+    char c = src.ptr()[i];
+    if (c == '\'') {
+      dst.append("''");
+    } else {
+      dst.append(&c, 1);
+    }
+  }
+}
+
 static int rewrite_ai_retry_where_clause(
     const ObString &orig_where,
     const ObString &state_col_name,
@@ -762,6 +774,7 @@ static int rewrite_ai_retry_where_clause(
   int32_t len = orig_where.length();
   int32_t i = 0;
   bool in_status_context = false;
+  int32_t status_paren_depth = 0;
 
   while (i < len && OB_SUCC(ret)) {
     char c = str[i];
@@ -805,7 +818,9 @@ static int rewrite_ai_retry_where_clause(
         } else {
           ret = out_where.append(str + start, i - start);
         }
-        in_status_context = false;
+        if (status_paren_depth <= 0) {
+          in_status_context = false;
+        }
       } else {
         ret = out_where.append(str + start, i - start);
       }
@@ -820,15 +835,25 @@ static int rewrite_ai_retry_where_clause(
         if (OB_SUCC(ret)) ret = out_where.append(state_col_name.ptr(), state_col_name.length());
         if (OB_SUCC(ret)) ret = out_where.append("`");
         in_status_context = true;
+        status_paren_depth = 0;
       } else {
         if (0 == word.case_compare("and") || 0 == word.case_compare("or") || 0 == word.case_compare("xor")) {
           in_status_context = false;
+          status_paren_depth = 0;
         }
         ret = out_where.append(str + start, i - start);
       }
     } else {
-      if (c == ';' || c == ')') {
+      if (c == '(' && in_status_context) {
+        status_paren_depth++;
+      } else if (c == ')' && in_status_context) {
+        if (--status_paren_depth <= 0) {
+          in_status_context = false;
+          status_paren_depth = 0;
+        }
+      } else if (c == ';') {
         in_status_context = false;
+        status_paren_depth = 0;
       }
       out_where.append_at(c);
       i++;
@@ -958,19 +983,22 @@ int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx, ObAlterTab
               int64_t req_id = ObTimeUtility::current_time();
               for (int64_t k = 0; OB_SUCC(ret) && k < matching_preds.count(); ++k) {
                 const ObString &rowkey_pred = matching_preds.at(k);
+                ObStringBuffer escaped_pred(&alloc);
+                escape_sql_str(rowkey_pred, escaped_pred);
                 int64_t affected_rows = 0;
                 // Delete old task
                 ObSqlString del_sql;
                 del_sql.assign_fmt("DELETE FROM oceanbase.__all_ai_column_task WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = '%.*s'",
-                                   table_id, col_id, rowkey_pred.length(), rowkey_pred.ptr());
+                                   table_id, col_id, static_cast<int>(escaped_pred.length()), escaped_pred.ptr());
                 (void)sql_proxy->write(del_sql.ptr(), affected_rows);
 
                 // Insert retry task
                 ObSqlString ins_sql;
                 ins_sql.assign_fmt("INSERT INTO oceanbase.__all_ai_column_task "
-                                   "(table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
-                                   "VALUES (%lu, %lu, '%.*s', %ld, now(6), 0, 0)",
-                                   table_id, col_id, rowkey_pred.length(), rowkey_pred.ptr(), req_id);
+                                   "(task_id, table_id, column_id, rowkey_predicate, request_id, eligible_ts, state, retry_count) "
+                                   "VALUES (%ld, %lu, %lu, '%.*s', %ld, now(6), 0, 0)",
+                                   req_id, table_id, col_id,
+                                   static_cast<int>(escaped_pred.length()), escaped_pred.ptr(), req_id);
                 if (OB_FAIL(sql_proxy->write(ins_sql.ptr(), affected_rows))) {
                   LOG_WARN("fail to insert ai retry task", K(ret), K(ins_sql));
                 } else {
