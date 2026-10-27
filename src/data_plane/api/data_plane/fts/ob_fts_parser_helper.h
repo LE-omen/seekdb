@@ -175,7 +175,8 @@ public:
       const char *fulltext,
       const int64_t fulltext_len,
       int64_t &doc_length,
-      ObFTWordMap &words) const;
+      ObFTWordMap &words,
+      common::ObIAllocator *token_allocator = nullptr) const;
   int check_is_the_same(
       const common::ObString &parser_name,
       const common::ObString &parser_properties,
@@ -192,6 +193,12 @@ public:
       const int64_t doc_length,
       common::ObIJsonBase *&json_root);
 
+  int make_detail_json(
+      common::ObIAllocator &allocator,
+      const ObFTWordMap &words,
+      const int64_t doc_length,
+      common::ObIJsonBase *&json_root);
+
   /**
    * Make json document for fulltext search
    *
@@ -199,6 +206,11 @@ public:
    * @param[out] json_root, json document
    */
   int make_token_array_json(
+      const ObFTWordMap &words,
+      common::ObIJsonBase *&json_root);
+
+  int make_token_array_json(
+      common::ObIAllocator &allocator,
       const ObFTWordMap &words,
       common::ObIJsonBase *&json_root);
 

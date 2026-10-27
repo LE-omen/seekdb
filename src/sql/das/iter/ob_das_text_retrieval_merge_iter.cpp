@@ -236,26 +236,77 @@ int ObDASTextRetrievalMergeIter::build_query_tokens(const ObDASIRScanCtDef *ir_c
 
     const ObObjMeta &meta = search_text->obj_meta_;
     int64_t doc_length = 0;
-    storage::ObFTParseHelper tokenize_helper;
-    common::ObSEArray<ObFTWord, 16> tokens;
-    hash::ObHashMap<ObFTWord, int64_t> token_map;
-    const int64_t ft_word_bkt_cnt = MAX(search_text_string.length() / 10, 2);
-    if (OB_FAIL(tokenize_helper.init(&alloc, parser_name, parser_properties))) {
-    } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
-    } else if (OB_FAIL(tokenize_helper.segment(
-                           meta,
-                           search_text_string.ptr(),
-                           search_text_string.length(),
-                           doc_length,
-                           token_map))) {
+    static thread_local storage::ObFTWordMap tl_token_map;
+    if (OB_UNLIKELY(!tl_token_map.created())) {
+      if (OB_FAIL(tl_token_map.create(997, common::ObMemAttr("FTWordMap")))) {
+        return ret;
+      }
     } else {
-      for (hash::ObHashMap<ObFTWord, int64_t>::const_iterator iter = token_map.begin();
-          OB_SUCC(ret) && iter != token_map.end();
-          ++iter) {
-        const ObFTWord &token = iter->first;
-        ObString token_string;
-        if (OB_FAIL(ob_write_string(alloc, token.get_word().get_string(), token_string))) {
-        } else if (OB_FAIL(query_tokens.push_back(token_string))) {
+      tl_token_map.reuse();
+    }
+
+    storage::ObFTParseHelper *helper_ptr = nullptr;
+    storage::ObFTParseHelper local_helper;
+
+    struct TLQueryHelperCache {
+      common::ObArenaAllocator alloc_{common::ObMemAttr("TLQueryHelper")};
+      storage::ObFTParseHelper ik_helper_;
+      storage::ObFTParseHelper beng_helper_;
+      bool ik_inited_{false};
+      bool beng_inited_{false};
+      ~TLQueryHelperCache() {
+        if (ik_inited_) { ik_helper_.reset(); ik_inited_ = false; }
+        if (beng_inited_) { beng_helper_.reset(); beng_inited_ = false; }
+      }
+    };
+    static thread_local TLQueryHelperCache tl_helpers;
+
+    if (parser_properties.empty() && 0 == parser_name.case_compare("ik")) {
+      if (!tl_helpers.ik_inited_) {
+        if (OB_FAIL(tl_helpers.ik_helper_.init(&tl_helpers.alloc_, parser_name, parser_properties))) {
+          tl_helpers.ik_helper_.reset();
+        } else {
+          tl_helpers.ik_inited_ = true;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        helper_ptr = &tl_helpers.ik_helper_;
+      }
+    } else if (parser_properties.empty() && 0 == parser_name.case_compare("beng")) {
+      if (!tl_helpers.beng_inited_) {
+        if (OB_FAIL(tl_helpers.beng_helper_.init(&tl_helpers.alloc_, parser_name, parser_properties))) {
+          tl_helpers.beng_helper_.reset();
+        } else {
+          tl_helpers.beng_inited_ = true;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        helper_ptr = &tl_helpers.beng_helper_;
+      }
+    } else {
+      if (OB_FAIL(local_helper.init(&alloc, parser_name, parser_properties))) {
+      } else {
+        helper_ptr = &local_helper;
+      }
+    }
+
+    if (OB_SUCC(ret) && OB_NOT_NULL(helper_ptr)) {
+      if (OB_FAIL(helper_ptr->segment(
+                             meta,
+                             search_text_string.ptr(),
+                             search_text_string.length(),
+                             doc_length,
+                             tl_token_map,
+                             &alloc))) {
+      } else {
+        for (storage::ObFTWordMap::const_iterator iter = tl_token_map.begin();
+            OB_SUCC(ret) && iter != tl_token_map.end();
+            ++iter) {
+          const ObFTWord &token = iter->first;
+          ObString token_string;
+          if (OB_FAIL(ob_write_string(alloc, token.get_word().get_string(), token_string))) {
+          } else if (OB_FAIL(query_tokens.push_back(token_string))) {
+          }
         }
       }
     }

@@ -81,7 +81,6 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
                                       ObIJsonBase *&result)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParseHelper tokenize_helper;
   int64_t doc_len = 0;
   static thread_local storage::ObFTWordMap tl_token_map;
   if (OB_UNLIKELY(!tl_token_map.created())) {
@@ -94,33 +93,77 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(tokenize_helper.init(&allocator, param.parser_name_, param.properties_))) {
-  } else if (
-      (0 != param.fulltext_.length())
-      && OB_FAIL(tokenize_helper.segment(
-                     param.meta_,
-                     param.fulltext_.ptr(),
-                     param.fulltext_.length(),
-                     doc_len,
-                     tl_token_map))) {
   } else {
-    switch (param.output_mode_) {
-    case TokenizeParam::OUTPUT_MODE::DEFAULT: {
-      if (OB_FAIL(tokenize_helper.make_token_array_json(tl_token_map, result))) {
-      } else {
-        // pass
+    storage::ObFTParseHelper *helper_ptr = nullptr;
+    storage::ObFTParseHelper local_helper;
+
+    struct TLHelperCache {
+      common::ObArenaAllocator alloc_{common::ObMemAttr("TLHelperCache")};
+      storage::ObFTParseHelper ik_helper_;
+      storage::ObFTParseHelper beng_helper_;
+      bool ik_inited_{false};
+      bool beng_inited_{false};
+      ~TLHelperCache() {
+        if (ik_inited_) { ik_helper_.reset(); ik_inited_ = false; }
+        if (beng_inited_) { beng_helper_.reset(); beng_inited_ = false; }
       }
-      break;
-    }
-    case TokenizeParam::OUTPUT_MODE::ALL: {
-      if (OB_FAIL(tokenize_helper.make_detail_json(tl_token_map, doc_len, result))) {
-      } else {
-        // pass
+    };
+    static thread_local TLHelperCache tl_helpers;
+
+    if (param.properties_.empty() && 0 == param.parser_name_.case_compare("ik.1")) {
+      if (!tl_helpers.ik_inited_) {
+        if (OB_FAIL(tl_helpers.ik_helper_.init(&tl_helpers.alloc_, param.parser_name_, param.properties_))) {
+          tl_helpers.ik_helper_.reset();
+        } else {
+          tl_helpers.ik_inited_ = true;
+        }
       }
-      break;
+      if (OB_SUCC(ret)) {
+        helper_ptr = &tl_helpers.ik_helper_;
+      }
+    } else if (param.properties_.empty() && 0 == param.parser_name_.case_compare("beng.1")) {
+      if (!tl_helpers.beng_inited_) {
+        if (OB_FAIL(tl_helpers.beng_helper_.init(&tl_helpers.alloc_, param.parser_name_, param.properties_))) {
+          tl_helpers.beng_helper_.reset();
+        } else {
+          tl_helpers.beng_inited_ = true;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        helper_ptr = &tl_helpers.beng_helper_;
+      }
+    } else {
+      if (OB_FAIL(local_helper.init(&allocator, param.parser_name_, param.properties_))) {
+      } else {
+        helper_ptr = &local_helper;
+      }
     }
-    default:
-      ret = OB_INVALID_ARGUMENT;
+
+    if (OB_SUCC(ret) && OB_NOT_NULL(helper_ptr)) {
+      if ((0 != param.fulltext_.length())
+          && OB_FAIL(helper_ptr->segment(
+                         param.meta_,
+                         param.fulltext_.ptr(),
+                         param.fulltext_.length(),
+                         doc_len,
+                         tl_token_map,
+                         &allocator))) {
+      } else {
+        switch (param.output_mode_) {
+        case TokenizeParam::OUTPUT_MODE::DEFAULT: {
+          if (OB_FAIL(helper_ptr->make_token_array_json(allocator, tl_token_map, result))) {
+          }
+          break;
+        }
+        case TokenizeParam::OUTPUT_MODE::ALL: {
+          if (OB_FAIL(helper_ptr->make_detail_json(allocator, tl_token_map, doc_len, result))) {
+          }
+          break;
+        }
+        default:
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
     }
   }
   return ret;
@@ -224,6 +267,19 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
 int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
+  if (0 == input_str.case_compare("ik") || 0 == input_str.case_compare("ik.1")) {
+    param.parser_name_ = ObString::make_string("ik.1");
+    return OB_SUCCESS;
+  } else if (0 == input_str.case_compare("beng") || 0 == input_str.case_compare("beng.1")) {
+    param.parser_name_ = ObString::make_string("beng.1");
+    return OB_SUCCESS;
+  } else if (0 == input_str.case_compare("space") || 0 == input_str.case_compare("space.1")) {
+    param.parser_name_ = ObString::make_string("space.1");
+    return OB_SUCCESS;
+  } else if (0 == input_str.case_compare("ngram") || 0 == input_str.case_compare("ngram.1")) {
+    param.parser_name_ = ObString::make_string("ngram.1");
+    return OB_SUCCESS;
+  }
   storage::ObFTParser parser;
 
   char *parser_name_buf = nullptr;
@@ -378,6 +434,10 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
 int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
 {
   int ret = OB_SUCCESS;
+  if (properties.empty()) {
+    properties_ = properties;
+    return OB_SUCCESS;
+  }
   storage::ObFTParserJsonProps parser_properties;
 
   if (OB_FAIL(parser_properties.init())) {
@@ -395,6 +455,13 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
 int ObExprTokenize::TokenizeParam::try_load_dictionary_for_ik()
 {
   int ret = OB_SUCCESS;
+  if (!parser_name_.prefix_case_match("ik")) {
+    return OB_SUCCESS;
+  }
+  static std::atomic<bool> ik_dict_loaded{false};
+  if (ik_dict_loaded.load(std::memory_order_relaxed)) {
+    return OB_SUCCESS;
+  }
   bool need_to_load_dic = false;
   storage::ObDicLoaderHandle dic_loader_handle;
   if (OB_FAIL(share::ObFtsIndexBuilderUtil::check_need_to_load_dic(
@@ -407,6 +474,8 @@ int ObExprTokenize::TokenizeParam::try_load_dictionary_for_ik()
     } else if (OB_UNLIKELY(!dic_loader_handle.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(dic_loader_handle.get_loader()->try_load_dictionary_in_trans())) {
+    } else {
+      ik_dict_loaded.store(true, std::memory_order_relaxed);
     }
   }
   return ret;
