@@ -221,9 +221,3 @@ TEST_F(TestAiColumnParser, ShowAiColumns)
   ASSERT_TRUE(show_stmt2 != NULL);
   ASSERT_EQ(T_SHOW_AI_COLUMNS, show_stmt2->type_);
 }
-
-int main(int argc, char **argv)
-{
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

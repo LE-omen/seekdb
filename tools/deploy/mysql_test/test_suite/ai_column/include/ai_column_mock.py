@@ -40,13 +40,24 @@ def stop_server(port):
     try:
         with open(pid_path, "r", encoding="ascii") as stream:
             pid = int(stream.read().strip())
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(50):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pid = None
+        if pid is not None:
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except (ProcessLookupError, OSError):
+                    pid = None
+                    break
+                time.sleep(0.02)
+        if pid is not None:
+            sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
             try:
-                os.kill(pid, 0)
+                os.kill(pid, sigkill)
             except (ProcessLookupError, OSError):
-                break
-            time.sleep(0.02)
+                pass
     except (ValueError, ProcessLookupError, OSError):
         pass
     try:

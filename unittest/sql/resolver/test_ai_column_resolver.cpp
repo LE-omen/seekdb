@@ -15,10 +15,8 @@
  */
 
 #include <gtest/gtest.h>
-#include "share/schema/ob_ai_column_schema.h"
-#include "share/schema/ob_table_schema.h"
-#include "share/schema/ob_column_schema.h"
-#include "share/ob_errno.def"
+#include "sql/resolver/ddl/ob_ddl_resolver.h"
+#include "lib/ob_errno.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share::schema;
@@ -264,10 +262,4 @@ TEST_F(TestAiColumnResolver, RowkeyQuoteEscaping)
     }
   }
   ASSERT_EQ("`code` = ''abc'' and `id` = 1", ObString(escaped.length(), escaped.ptr()));
-}
-
-int main(int argc, char **argv)
-{
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
 }

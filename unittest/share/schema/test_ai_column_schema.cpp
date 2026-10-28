@@ -256,9 +256,3 @@ TEST_F(TestAiColumnSchema, TableSchemaIntegration)
   ASSERT_TRUE(copied_table.is_ai_column(16));
   ASSERT_TRUE(copied_table.is_ai_column(17));
 }
-
-int main(int argc, char **argv)
-{
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
