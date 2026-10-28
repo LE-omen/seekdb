@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +15,8 @@ from urllib.parse import urlparse
 
 
 def state_dir(port):
-    return "/tmp/seekdb_ai_column_mock_%d" % port
+    base = "/tmp" if os.path.exists("/tmp") else tempfile.gettempdir()
+    return os.path.join(base, "seekdb_ai_column_mock_%d" % port)
 
 
 def state_path(port, name):
@@ -65,6 +67,14 @@ def stop_server(port):
     except FileNotFoundError:
         pass
 
+    # Ensure port is released
+    for _ in range(50):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.05):
+                time.sleep(0.02)
+        except OSError:
+            break
+
 
 def start_server(port):
     os.makedirs(state_dir(port), exist_ok=True)
@@ -74,7 +84,7 @@ def start_server(port):
             pass
     output = open(state_path(port, "server.out"), "a", encoding="utf-8")
     process = subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "serve", str(port)],
+        [sys.executable, "-u", os.path.abspath(__file__), "serve", str(port)],
         stdin=subprocess.DEVNULL,
         stdout=output,
         stderr=subprocess.STDOUT,
@@ -82,14 +92,14 @@ def start_server(port):
     )
     with open(state_path(port, "server.pid"), "w", encoding="ascii") as stream:
         stream.write(str(process.pid))
-    for _ in range(100):
+    for _ in range(300):
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.05):
                 return
         except OSError:
             if process.poll() is not None:
                 break
-            time.sleep(0.02)
+            time.sleep(0.05)
     raise RuntimeError("AI column mock did not start on port %d" % port)
 
 
@@ -197,7 +207,11 @@ def serve(port):
             self.end_headers()
             self.wfile.write(payload)
 
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    class ReusableServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    ReusableServer(("127.0.0.1", port), Handler).serve_forever()
 
 
 def assert_events(port, assertion):
